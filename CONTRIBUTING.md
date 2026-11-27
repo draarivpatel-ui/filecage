@@ -5,7 +5,7 @@ Thank you for helping improve `filecage`.
 ## Ground rules
 
 - Security behavior must fail closed by default.
-- Do not add runtime dependencies or devDependencies.
+- Do not add runtime dependencies. Keep development dependencies limited to fast-check for property fuzz tests.
 - Keep Node 18 compatibility.
 - Keep ESM, generated CommonJS, and hand-written TypeScript definitions in sync.
 - Do not trust filenames, browser MIME types, or user-controlled metadata as
@@ -15,7 +15,7 @@ Thank you for helping improve `filecage`.
 
 ## Development setup
 
-No install step is required because the package has no dependencies.
+The published library has no runtime dependencies. Run `npm ci` before `npm run test:fuzz` because fast-check is a development-only dependency.
 
 ```sh
 npm test
@@ -38,7 +38,7 @@ npm pack --dry-run
 
 ## Test style
 
-Tests use `node:test` and `node:assert/strict` only. Byte fixtures should be as
+Core tests use `node:test` and `node:assert/strict`. Property fuzz tests also use fast-check. Byte fixtures should be as
 small as possible while preserving the structure under test. Prefer tables of
 explicit attack cases over broad snapshots. Tests for malformed parsers must
 prove termination and bounds checking, not merely output shape.

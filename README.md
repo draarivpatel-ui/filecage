@@ -11,8 +11,9 @@ executable and active content, detects common polyglots, and produces a safe
 storage filename.
 
 The library ships ESM, CommonJS, TypeScript definitions, and a small CLI from
-one audited source of truth. It has zero runtime dependencies and zero
-devDependencies. The deterministic suite contains exactly 903 tests in this source checkout.
+one audited source of truth. It has zero runtime dependencies. Its only
+development dependency is the property-test library fast-check. The deterministic
+suite contains exactly 903 tests in this source checkout.
 
 ## Publication status
 

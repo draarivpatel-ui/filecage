@@ -11,9 +11,8 @@
 ## Reporting a vulnerability
 
 Please do not open a public issue for an exploitable vulnerability. Use the
-GitHub private vulnerability reporting flow for this repository when available,
-or open a minimal public issue asking for a private contact path without
-including exploit details.
+repository's [GitHub Security Advisory form](https://github.com/draarivpatel-ui/filecage/security/advisories/new) and do not include
+exploit details in public discussion.
 
 Include:
 
@@ -28,10 +27,10 @@ in a proof of concept.
 
 ## Response goals
 
-- Acknowledgment within 7 days.
-- Triage and reproduction as soon as feasible.
-- A fix, regression test, and advisory decision before public disclosure when
-  the report is valid.
+- Acknowledgment: within 48 hours.
+- Initial assessment: within 7 calendar days.
+- Fix or mitigation plan: within 30 calendar days for confirmed high-impact reports.
+- Coordinated public disclosure: up to 90 days by default, adjusted by mutual agreement when exploitation or user risk requires a different date.
 
 ## Security expectations and limitations
 

@@ -107,9 +107,12 @@ test('package metadata has required name version and license', () => {
   assert.equal(packageJson.license, 'MIT');
 });
 
-test('package has zero runtime and development dependencies', () => {
+test('package has zero runtime dependencies and confines fuzzing to development use', () => {
   assert.deepEqual(packageJson.dependencies, {});
-  assert.deepEqual(packageJson.devDependencies, {});
+  assert.deepEqual(Object.keys(packageJson.devDependencies), ['fast-check']);
+  assert.equal(typeof packageJson.devDependencies['fast-check'], 'string');
+  assert.equal(packageJson.devDependencies['fast-check'].startsWith('^'), false);
+  assert.equal(packageJson.devDependencies['fast-check'].startsWith('~'), false);
 });
 
 test('package requires Node 18 or newer', () => {
