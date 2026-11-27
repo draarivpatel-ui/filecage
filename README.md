@@ -1,5 +1,7 @@
 # filecage
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/draarivpatel-ui/filecage/badge)](https://scorecard.dev/viewer/?uri=github.com/draarivpatel-ui/filecage)
+
 Zero-dependency CWE-434 file-upload defense for Node.js.
 
 `filecage` verifies what an upload actually is before application code trusts it.
