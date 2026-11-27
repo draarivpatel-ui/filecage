@@ -10,7 +10,7 @@ storage filename.
 
 The library ships ESM, CommonJS, TypeScript definitions, and a small CLI from
 one audited source of truth. It has zero runtime dependencies and zero
-devDependencies. The deterministic suite contains more than 500 tests.
+devDependencies. The deterministic suite contains exactly 903 tests in this source checkout.
 
 ## Publication status
 
@@ -43,22 +43,22 @@ file is harmless in every possible viewer.
 
 | Attack | CWE | Defense |
 | --- | --- | --- |
-| Executable or script uploaded with an image extension and image MIME type | CWE-434 | Magic-byte detection identifies ELF, PE, Mach-O, WASM, and shebang content and blocks it by default. |
+| Executable or script uploaded with an image extension and image MIME type | CWE-434 | Magic-byte detection identifies ELF, PE, thin and universal Mach-O, Java class, WASM, and direct or obfuscated shebang content and blocks it by default. |
 | MIME spoofing through a caller-controlled `Content-Type` header | CWE-434 | The claimed type is stripped of parameters and compared with the verified type. Mismatches reject the upload. |
 | Extension spoofing such as `avatar.png` containing JPEG or executable bytes | CWE-434 | The filename extension is compared with the verified type using explicit alias groups. |
 | RTLO right-to-left override names such as `report U+202E gnp.exe` | CWE-434 | Unicode bidi controls are rejected and removed by the sanitizer. |
 | Path traversal through slash, backslash, dot, or empty filenames | CWE-22 | Path separators are never preserved. Dot aliases, empty names, controls, NUL, trailing dots, and trailing spaces are rejected by default. |
 | Windows device names such as `CON`, `NUL`, `COM1`, `LPT1`, and superscript variants | CWE-22 | Reserved names are detected case-insensitively after Unicode compatibility normalization and neutralized. |
 | Double-extension attacks such as `invoice.pdf.exe` or `avatar.png.php` | CWE-434 | Active final extensions after a plausible document or image extension are flagged and normalized. |
-| GIFAR, JPEG plus ZIP, and similar image archive polyglots | CWE-434 | Raster images are scanned for ZIP local-header and end-of-central-directory signatures. PNG trailing bytes after IEND reject the file. |
-| SVG script execution, event handlers, active hrefs, `foreignObject`, and remote `<use>` references | CWE-79 | SVG is blocked by default. Explicit opt-in still requires the active-content scan to pass. |
+| GIFAR, JPEG plus ZIP, and similar image archive polyglots | CWE-434 | Raster images are scanned for ZIP local-header and end-of-central-directory signatures. PNG trailing bytes after IEND reject the file. Compressed PNG zTXt and iTXt metadata is inflated with strict output caps and scanned for active payloads. |
+| SVG script execution, event handlers, active hrefs, animated href assignment, `foreignObject`, remote `<use>` or image references, stylesheet processing instructions, and CSS network access | CWE-79 | SVG is blocked by default. Explicit opt-in still requires the active-content scan to pass. |
 | SVG XML external entities and entity declarations | CWE-611 | DOCTYPE and ENTITY declarations reject the upload. |
-| PDF JavaScript, launch actions, automatic actions, embedded files, and URI actions | CWE-434 | PDF names are decoded, including hex-escaped names. Flate-compressed object streams are inflated with strict output caps and scanned. URI rejection can be configured. |
+| PDF JavaScript, launch actions, automatic actions, singular or plural embedded-file names, and URI actions | CWE-434 | PDF headers are accepted at the specification-permitted offset within the first 1024 bytes. PDF names are decoded, including hex-escaped names. Flate-compressed object streams are inflated with strict output caps and scanned. URI rejection can be configured. |
 | PNG, JPEG, GIF, WebP, and BMP pixel floods and decompression bombs | CWE-400 | Width, height, and total pixels are read from binary headers and capped before any image decoder is invoked. |
 | Malformed JPEG marker loops and truncated image headers | CWE-400 | The marker walker is iterative, bounded, monotonic, and rejects impossible lengths. |
 | Unknown binary content | CWE-434 | Strict UTF-8 and magic-byte detection fail closed unless unknown types are explicitly enabled. |
-| FIFOs, devices, sockets, directories, symlinks, and oversized paths | CWE-59 / CWE-400 | Path validation uses `lstat`, regular-file checks, `O_NOFOLLOW` where available, descriptor `fstat`, size checks before reading, and a post-read stability check. |
-| Terminal control injection through filenames in CLI output | CWE-117 | The CLI removes terminal control characters before printing names. |
+| FIFOs, devices, sockets, directories, symlinks, executable-mode files, and oversized paths | CWE-59 / CWE-400 / CWE-434 | Path validation uses `lstat`, regular-file checks, `O_NOFOLLOW` and `O_NONBLOCK` where available, descriptor `fstat`, POSIX executable-mode rejection, size checks before reading, and a post-read stability check. |
+| Terminal control and bidirectional-text injection through filenames in CLI output | CWE-117 | The CLI removes terminal control characters and Unicode bidi controls before printing names. |
 
 ## What filecage does not do
 
@@ -81,7 +81,8 @@ place:
 PDF scanning is a security scanner, not a full PDF parser. It scans direct PDF
 names and bounded Flate object streams. SVG scanning detects the dangerous
 constructs listed in this README; it is not a sanitizer that makes active SVG
-safe to serve inline.
+safe to serve inline. OOXML detection distinguishes macro-free DOCX, XLSX,
+and PPTX files from macro-bearing files containing `vbaProject.bin`.
 
 ## Quick start
 
@@ -191,7 +192,7 @@ allowlist when either the verified MIME type or a compatible extension matches.
 | `requireExtension` | `true` | Reject names without an extension. |
 | `requireContentType` | `false` | Require a caller-supplied content type. It is still never trusted by itself. |
 | `allowGenericContentType` | `false` | Tolerate `application/octet-stream` as non-informative metadata. |
-| `allowExecutables` | `false` | Permit ELF, PE, Mach-O, WASM, or shebang content. Almost never enable this. |
+| `allowExecutables` | `false` | Permit ELF, PE, Mach-O, Java class, WASM, shebang, macro-bearing OOXML, or executable-mode path content. Almost never enable this. |
 | `allowUnknownTypes` | `false` | Permit content that cannot be identified. |
 | `allowSvg` | `false` | Permit SVG after active-content scanning. |
 | `allowMarkup` | `false` | Permit inert HTML or XML after active-content scanning. |
@@ -223,10 +224,11 @@ Returns a frozen detection result:
 ```
 
 Detected families include PNG, JPEG, GIF 87a and 89a, WebP, BMP, ICO, AVIF,
-HEIF, TIFF little-endian and big-endian, PDF, ZIP, DOCX, XLSX, PPTX, JAR, GZIP,
-ZSTD, TAR, MP3, MP4, QuickTime, OGG, WAV, FLAC, WebM, Matroska, WASM, ELF,
-PE or DOS executables, Mach-O, shebang scripts, HTML, SVG, XML, strict UTF-8
-plain text, JSON, and consistent-column CSV.
+HEIF, TIFF little-endian and big-endian, PDF, ZIP, DOCX, XLSX, PPTX, macro-bearing
+DOCM, XLSM, and PPTX, JAR, GZIP, ZSTD, TAR, MP3, MP4, QuickTime, OGG, WAV,
+FLAC, WebM, Matroska, WASM, ELF, PE or DOS executables, Mach-O, Java class
+files, shebang scripts, HTML, SVG, XML, strict UTF-8 plain text, JSON, and
+consistent-column CSV.
 
 ### `inspectImageDimensions(bytes)`
 
@@ -268,17 +270,19 @@ when bytes came from a trusted object store key rather than a multipart upload.
 
 ### `validateFilePath(filePath, policy)`
 
-Inspects a local path using `lstat`, regular-file checks, `O_NOFOLLOW` where the
-platform supports it, descriptor `fstat`, a size cap before reading, bounded
-reads, and a post-read stability check. It rejects directories, symlinks,
-FIFOs, devices, sockets, unstable files, and oversized files.
+Inspects a local path using `lstat`, regular-file checks, `O_NOFOLLOW` and
+`O_NONBLOCK` where the platform supports them, descriptor `fstat`, a size cap
+before reading, bounded reads, and a post-read stability check. It rejects
+directories, symlinks, FIFOs, devices, sockets, unstable files, oversized
+files, and files with POSIX executable permission bits.
 
 ### `validateWebFile(file, policy)`
 
 Accepts a Fetch or browser `File`/`Blob`-shaped object with `arrayBuffer()` and
-uses its `name`, `type`, `size`, and `slice()` when available. Oversized files
-are rejected from their declared size while reading at most `maxBytes + 1`
-bytes for inspection. The digest is `null` for truncated input.
+uses its `name`, `type`, and `size`. Reads are bounded through `stream()` when
+available or through `slice(0, maxBytes + 1)` otherwise. An object with neither
+interface fails closed without invoking unbounded `arrayBuffer()`. The digest
+is `null` for truncated input or inconsistent oversized metadata.
 
 ### `createUploadGuard(policy)` and `createFileCage(policy)`
 
@@ -292,8 +296,9 @@ overrides do not mutate the guard policy.
 Returns a frozen report containing `filename`, `stem`, `extension`,
 `sourceExtension`, `changed`, `byteLength`, and `findings`. It strips path
 components, removes controls and bidi overrides, replaces Windows-unsafe
-characters, neutralizes reserved device names and active double extensions,
-enforces the UTF-8 byte cap, and never preserves a trailing dot or space.
+characters, rejects dotfiles, neutralizes reserved device names and active
+double extensions, enforces the UTF-8 byte cap even for very long extensions,
+and never preserves a trailing dot or space.
 
 ### `assertSafeFilename(filename, options)`
 
@@ -311,7 +316,7 @@ hostile one.
 | `FILECAGE_MAX_BYTES` | The upload exceeds the byte cap. |
 | `FILECAGE_UNRECOGNIZED_TYPE` | Neither magic bytes nor strict text decoding identified the content. |
 | `FILECAGE_TYPE_NOT_ALLOWED` | The verified type is outside the configured allowlist. |
-| `FILECAGE_EXECUTABLE_TYPE` | ELF, PE, Mach-O, WASM, or shebang executable content was found. |
+| `FILECAGE_EXECUTABLE_TYPE` | ELF, PE, Mach-O, Java class, WASM, shebang, macro-bearing OOXML, or executable-mode path content was found. |
 | `FILECAGE_ARCHIVE_NOT_ALLOWED` | An archive container requires explicit opt-in. |
 | `FILECAGE_MARKUP_NOT_ALLOWED` | HTML or XML markup requires explicit opt-in. |
 | `FILECAGE_SVG_NOT_ALLOWED` | SVG requires explicit opt-in. |
@@ -332,7 +337,7 @@ hostile one.
 | `FILECAGE_SVG_ACTIVE_CONTENT` | SVG contains script, events, active hrefs, foreignObject, or remote use. |
 | `FILECAGE_SVG_XXE` | SVG contains DOCTYPE or ENTITY syntax. |
 | `FILECAGE_FILENAME_EMPTY` | Filename is empty. |
-| `FILECAGE_FILENAME_DOT_NAME` | Filename is `.` or `..`. |
+| `FILECAGE_FILENAME_DOT_NAME` | Filename is `.`, `..`, or a dotfile such as `.env`. |
 | `FILECAGE_FILENAME_TOO_LONG` | Filename exceeds the UTF-8 byte cap. |
 | `FILECAGE_FILENAME_NUL` | Filename contains NUL. |
 | `FILECAGE_FILENAME_CONTROL` | Filename contains a C0, DEL, or C1 control. |

@@ -184,11 +184,17 @@ test('license is MIT and copyright holder is project contributors', () => {
   assert.match(license, /filecage contributors/);
 });
 
-test('gitattributes enforces LF for required text file types', () => {
+test('gitattributes enforces LF for required text file types and repository metadata', () => {
   const attributes = readFileSync(path.join(root, '.gitattributes'), 'utf8');
-  for (const extension of ['*.mjs', '*.cjs', '*.js', '*.ts', '*.json', '*.md', '*.yml']) {
+  for (const extension of ['.gitattributes', '.gitignore', 'LICENSE', '*.mjs', '*.cjs', '*.js', '*.ts', '*.json', '*.md', '*.yml']) {
     assert.equal(attributes.includes(extension + ' text eol=lf'), true, extension);
   }
+});
+
+test('local path opening uses non-blocking descriptor flags where the platform provides them', () => {
+  const source = readFileSync(path.join(root, 'src', 'index.mjs'), 'utf8');
+  assert.match(source, /O_NONBLOCK/);
+  assert.match(source, /O_NOFOLLOW/);
 });
 
 test('gitignore excludes node_modules and package tarballs', () => {

@@ -326,12 +326,21 @@ function sniffZipFamily(bytes) {
   const hasContentTypes = names.includes('[content_types].xml');
   const hasName = (name) => names.includes(name);
   if (hasContentTypes && hasName('word/document.xml')) {
+    if (hasName('word/vbaproject.bin')) {
+      return sniffResult('application/vnd.ms-word.document.macroEnabled.12', 'docm', 'document', 'docm', true, true, 'zip-ooxml-macro');
+    }
     return sniffResult('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx', 'document', 'docx', false, true, 'zip-ooxml');
   }
   if (hasContentTypes && hasName('xl/workbook.xml')) {
+    if (hasName('xl/vbaproject.bin')) {
+      return sniffResult('application/vnd.ms-excel.sheet.macroEnabled.12', 'xlsm', 'document', 'xlsm', true, true, 'zip-ooxml-macro');
+    }
     return sniffResult('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx', 'document', 'xlsx', false, true, 'zip-ooxml');
   }
   if (hasContentTypes && hasName('ppt/presentation.xml')) {
+    if (hasName('ppt/vbaproject.bin')) {
+      return sniffResult('application/vnd.ms-powerpoint.presentation.macroEnabled.12', 'pptm', 'document', 'pptm', true, true, 'zip-ooxml-macro');
+    }
     return sniffResult('application/vnd.openxmlformats-officedocument.presentationml.presentation', 'pptx', 'document', 'pptx', false, true, 'zip-ooxml');
   }
   if (names.includes('meta-inf/manifest.mf')) {
@@ -610,6 +619,35 @@ function isMp3FrameStart(bytes) {
   return version !== 1 && layer !== 0 && bitrate !== 0 && bitrate !== 15 && sampleRate !== 3;
 }
 
+function pdfHeaderOffset(bytes) {
+  const marker = [0x25, 0x50, 0x44, 0x46, 0x2d];
+  for (let index = 0; index < 1024 && index + marker.length <= bytes.length; index += 1) {
+    if (bytesEqualAt(bytes, index, marker)) return index;
+  }
+  return -1;
+}
+
+function shebangOffset(bytes) {
+  let start = 0;
+  if (bytesEqualAt(bytes, 0, [0xef, 0xbb, 0xbf])) start = 3;
+  if (bytesEqualAt(bytes, start, [0x23, 0x21])) return start;
+  let cursor = start;
+  let spaces = 0;
+  while (cursor < bytes.length && (bytes[cursor] === 0x20 || bytes[cursor] === 0x09)) {
+    cursor += 1;
+    spaces += 1;
+  }
+  if (spaces > 0 && bytesEqualAt(bytes, cursor, [0x23, 0x21])) return cursor;
+  return -1;
+}
+
+function looksLikeJavaClass(bytes) {
+  if (!bytesEqualAt(bytes, 0, [0xca, 0xfe, 0xba, 0xbe]) || bytes.length < 8) return false;
+  const minor = u16be(bytes, 4);
+  const major = u16be(bytes, 6);
+  return major >= 45 && (minor === 0 || minor === 65535);
+}
+
 function sniffFileType(input) {
   const bytes = normalizeBytes(input);
   if (bytes.length === 0) return UNKNOWN_TYPE;
@@ -623,16 +661,21 @@ function sniffFileType(input) {
   if (bytesEqualAt(bytes, 0, [0x4d, 0x5a])) {
     return sniffResult('application/vnd.microsoft.portable-executable', 'exe', 'executable', 'pe', true, true, 'magic');
   }
+  if (looksLikeJavaClass(bytes)) {
+    return sniffResult('application/java-class', 'class', 'executable', 'java-class', true, true, 'magic');
+  }
   const machoMagics = [
     [0xfe, 0xed, 0xfa, 0xce], [0xce, 0xfa, 0xed, 0xfe],
     [0xfe, 0xed, 0xfa, 0xcf], [0xcf, 0xfa, 0xed, 0xfe],
-    [0xca, 0xfe, 0xba, 0xbe], [0xca, 0xfe, 0xba, 0xbf]
+    [0xca, 0xfe, 0xba, 0xbe], [0xbe, 0xba, 0xfe, 0xca],
+    [0xca, 0xfe, 0xba, 0xbf], [0xbf, 0xba, 0xfe, 0xca]
   ];
   if (machoMagics.some((magic) => bytesEqualAt(bytes, 0, magic))) {
     return sniffResult('application/x-mach-binary', 'macho', 'executable', 'macho', true, true, 'magic');
   }
-  if (bytesEqualAt(bytes, 0, [0x23, 0x21])) {
-    return sniffResult('application/x-shebang', 'sh', 'executable', 'shebang', true, true, 'shebang');
+  const scriptOffset = shebangOffset(bytes);
+  if (scriptOffset !== -1) {
+    return sniffResult('application/x-shebang', 'sh', 'executable', 'shebang', true, true, 'shebang', scriptOffset);
   }
 
   if (bytesEqualAt(bytes, 0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
@@ -661,8 +704,9 @@ function sniffFileType(input) {
   }
   const ftyp = sniffFtyp(bytes);
   if (ftyp) return ftyp;
-  if (asciiAt(bytes, 0, 5) === '%PDF-') {
-    return sniffResult('application/pdf', 'pdf', 'document', 'pdf', false, true, 'magic');
+  const pdfOffset = pdfHeaderOffset(bytes);
+  if (pdfOffset !== -1) {
+    return sniffResult('application/pdf', 'pdf', 'document', 'pdf', false, true, 'magic', pdfOffset);
   }
   if (u32le(bytes, 0) === 0x04034b50 || u32le(bytes, 0) === 0x08074b50 || u32le(bytes, 0) === 0x06054b50) {
     return sniffZipFamily(bytes);
@@ -819,7 +863,8 @@ function isBidiControlCodePoint(codePoint) {
   return (codePoint >= 0x202a && codePoint <= 0x202e)
     || (codePoint >= 0x2066 && codePoint <= 0x2069)
     || codePoint === 0x200e
-    || codePoint === 0x200f;
+    || codePoint === 0x200f
+    || codePoint === 0x061c;
 }
 
 function utf8ByteLength(text) {
@@ -846,21 +891,21 @@ function splitFinalExtension(filename) {
 }
 
 function fitFilenameToBytes(stem, extension, maxBytes, seed) {
-  const suffix = extension ? '.' + extension : '';
-  const suffixBytes = utf8ByteLength(suffix);
-  const available = Math.max(1, maxBytes - suffixBytes);
-  if (utf8ByteLength(stem) <= available) return stem + suffix;
+  let suffix = extension ? '.' + extension : '';
+  if (utf8ByteLength(stem + suffix) <= maxBytes) return stem + suffix;
   const hash = sha256Hex(new TextEncoder().encode(seed)).slice(0, 8);
   const reserve = utf8ByteLength(hash) + 1;
-  const stemBudget = Math.max(1, available - reserve);
+  if (utf8ByteLength(suffix) + reserve + 1 > maxBytes) suffix = '';
+  const suffixBytes = utf8ByteLength(suffix);
+  const stemBudget = Math.max(0, maxBytes - suffixBytes - reserve);
   let shortened = truncateUtf8(stem, stemBudget).replace(/[. ]+$/u, '');
-  if (!shortened) shortened = 'file';
+  if (!shortened) shortened = 'f';
   return shortened + '-' + hash + suffix;
 }
 
 function windowsReservedStem(filename) {
   const trimmed = filename.replace(/[. ]+$/u, '');
-  const firstPart = trimmed.split('.')[0] || '';
+  const firstPart = (trimmed.split(/[.:]/u)[0] || '').replace(/[. ]+$/u, '');
   const key = firstPart.normalize('NFKC').toLowerCase();
   if (/^(con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])$/.test(key)) return key;
   return null;
@@ -870,7 +915,7 @@ function doubleExtensionParts(filename) {
   const parts = filename.split('.').filter((part) => part.length > 0);
   if (parts.length < 3) return null;
   const finalPart = parts[parts.length - 1].toLowerCase();
-  const previous = parts[parts.length - 2].toLowerCase();
+  const previous = parts[parts.length - 2].replace(/[. ]+$/u, '').toLowerCase();
   if (!ACTIVE_DOUBLE_EXTENSIONS.has(finalPart)) return null;
   if (!/^[a-z0-9]{1,12}$/.test(previous)) return null;
   return { previous, final: finalPart };
@@ -921,9 +966,13 @@ function sanitizeFilename(input, options) {
   let basename = segments[segments.length - 1] || '';
 
   if (/[. ]$/u.test(basename)) add(ERROR.FILENAME_TRAILING_DOTS_SPACES, 'filename ends in a dot or space');
-  const reservedBefore = windowsReservedStem(basename);
+  if (basename.length > 1 && basename.startsWith('.')) {
+    add(ERROR.FILENAME_DOT_NAME, 'filename is a dotfile or relative directory alias');
+  }
+  const windowsComparable = basename.replace(/[. ]+$/u, '');
+  const reservedBefore = windowsReservedStem(windowsComparable);
   if (reservedBefore) add(ERROR.FILENAME_RESERVED_DEVICE, 'filename uses a Windows reserved device name', { actual: reservedBefore });
-  const doubleBefore = doubleExtensionParts(basename);
+  const doubleBefore = doubleExtensionParts(windowsComparable);
   if (doubleBefore) {
     add(ERROR.FILENAME_DOUBLE_EXTENSION, 'filename uses a double extension ending in active content', {
       extension: doubleBefore.final,
@@ -931,7 +980,7 @@ function sanitizeFilename(input, options) {
     });
   }
 
-  const sourceParts = splitFinalExtension(basename);
+  const sourceParts = splitFinalExtension(windowsComparable);
   const sourceExtension = sourceParts.extension;
 
   let outputChars = '';
@@ -952,7 +1001,7 @@ function sanitizeFilename(input, options) {
   if (doubleBefore) {
     const finalSuffix = '.' + doubleBefore.final;
     if (sanitized.toLowerCase().endsWith(finalSuffix)) {
-      const stem = sanitized.slice(0, -finalSuffix.length).replace(/\.+/g, '_');
+      const stem = sanitized.slice(0, -finalSuffix.length).replace(/\.+/g, '_').replace(/[. ]+$/u, '');
       sanitized = stem + finalSuffix;
     }
   }
@@ -1111,6 +1160,10 @@ function normalizeExtensionList(value, key) {
   return Object.freeze(output);
 }
 
+function ownValue(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key) ? object[key] : undefined;
+}
+
 function normalizePolicy(policy) {
   let input = policy;
   if (input === undefined || input === null) input = {};
@@ -1118,11 +1171,12 @@ function normalizePolicy(policy) {
   if (typeof input !== 'object' || Array.isArray(input)) invalidPolicy('policy must be a preset name or plain object');
 
   let output = { ...DEFAULT_POLICY };
-  if (input.preset !== undefined && input.preset !== 'default') {
-    if (typeof input.preset !== 'string' || !Object.prototype.hasOwnProperty.call(FILECAGE_PRESETS, input.preset)) {
+  const preset = ownValue(input, 'preset');
+  if (preset !== undefined && preset !== 'default') {
+    if (typeof preset !== 'string' || !Object.prototype.hasOwnProperty.call(FILECAGE_PRESETS, preset)) {
       invalidPolicy('unknown preset', 'preset');
     }
-    output = { ...output, ...FILECAGE_PRESETS[input.preset] };
+    output = { ...output, ...FILECAGE_PRESETS[preset] };
   }
   for (const key of Object.keys(input)) {
     if (!POLICY_KEYS.has(key)) invalidPolicy('unknown policy option', key);
@@ -1158,7 +1212,7 @@ function normalizePolicy(policy) {
 function mergePolicy(base, overrides) {
   if (overrides === undefined || overrides === null) return normalizePolicy(base);
   if (typeof overrides === 'string') return normalizePolicy(overrides);
-  if (typeof overrides === 'object' && !Array.isArray(overrides) && overrides.preset !== undefined) return normalizePolicy(overrides);
+  if (typeof overrides === 'object' && !Array.isArray(overrides) && ownValue(overrides, 'preset') !== undefined) return normalizePolicy(overrides);
   return normalizePolicy({ ...base, ...overrides });
 }
 
@@ -1314,7 +1368,7 @@ function collectCompressedPdfNames(bytes, names) {
   return scanLimited;
 }
 
-const PDF_ACTIVE_NAMES = new Set(['JAVASCRIPT', 'JS', 'LAUNCH', 'OPENACTION', 'AA', 'EMBEDDEDFILE', 'URI']);
+const PDF_ACTIVE_NAMES = new Set(['JAVASCRIPT', 'JS', 'LAUNCH', 'OPENACTION', 'AA', 'EMBEDDEDFILE', 'EMBEDDEDFILES', 'URI']);
 
 function scanPdfActiveContent(bytes, policy) {
   const findings = [];
@@ -1356,6 +1410,119 @@ function compactSchemeValue(value) {
   return value.replace(/[\u0000-\u0020\u007f-\u009f]+/g, '').toLowerCase();
 }
 
+function localXmlName(name) {
+  const lower = name.toLowerCase();
+  const colon = lower.lastIndexOf(':');
+  return colon === -1 ? lower : lower.slice(colon + 1);
+}
+
+function xmlNameChar(char) {
+  return (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char === '_' || char === '-' || char === '.' || char === ':';
+}
+
+function scanXmlTags(text) {
+  const tags = [];
+  let position = 0;
+  while (position < text.length) {
+    const start = text.indexOf('<', position);
+    if (start === -1) break;
+    if (text.startsWith('<!--', start)) {
+      const endComment = text.indexOf('-->', start + 4);
+      position = endComment === -1 ? text.length : endComment + 3;
+      continue;
+    }
+    if (text.startsWith('<![CDATA[', start)) {
+      const endCdata = text.indexOf(']]>', start + 9);
+      position = endCdata === -1 ? text.length : endCdata + 3;
+      continue;
+    }
+    let quote = '';
+    let end = -1;
+    for (let index = start + 1; index < text.length; index += 1) {
+      const char = text[index];
+      if (quote) {
+        if (char === quote) quote = '';
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+        continue;
+      }
+      if (char === '>') {
+        end = index;
+        break;
+      }
+    }
+    if (end === -1) break;
+    const raw = text.slice(start, end + 1);
+    position = end + 1;
+    let cursor = 1;
+    let processing = false;
+    let closing = false;
+    if (raw[cursor] === '?') {
+      processing = true;
+      cursor += 1;
+    } else if (raw[cursor] === '/') {
+      closing = true;
+      cursor += 1;
+    } else if (raw[cursor] === '!') {
+      continue;
+    }
+    while (cursor < raw.length && /\s/.test(raw[cursor])) cursor += 1;
+    const nameStart = cursor;
+    while (cursor < raw.length && xmlNameChar(raw[cursor])) cursor += 1;
+    const name = raw.slice(nameStart, cursor);
+    if (name) tags.push(Object.freeze({ raw, name, closing, processing }));
+  }
+  return tags;
+}
+
+function parseXmlAttributes(rawTag) {
+  const attributes = [];
+  const attributePattern = /([A-Za-z_][A-Za-z0-9_.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+  for (const match of rawTag.matchAll(attributePattern)) {
+    const rawValue = match[2] === undefined ? (match[3] === undefined ? (match[4] || '') : match[3]) : match[2];
+    attributes.push({
+      name: match[1].toLowerCase(),
+      localName: localXmlName(match[1]),
+      value: decodeXmlEntities(rawValue)
+    });
+  }
+  return attributes;
+}
+
+function decodeCssEscapes(text) {
+  return text.replace(/\\([0-9a-fA-F]{1,6}\s?|.)/g, (whole, escaped) => {
+    if (/^[0-9a-fA-F]/.test(escaped)) {
+      const codePoint = parseInt(escaped.trimEnd(), 16);
+      if (Number.isSafeInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff) {
+        try {
+          return String.fromCodePoint(codePoint);
+        } catch {
+          return whole;
+        }
+      }
+      return whole;
+    }
+    return escaped;
+  });
+}
+
+function scanSvgCss(text, addOnce) {
+  const decoded = decodeCssEscapes(decodeXmlEntities(text));
+  if (/@import\b/i.test(decoded)) {
+    addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG CSS imports an external stylesheet', { pattern: 'css-import' });
+  }
+  const urlPattern = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\)/gi;
+  for (const match of decoded.matchAll(urlPattern)) {
+    const raw = match[1] === undefined ? (match[2] === undefined ? (match[3] || '') : match[2]) : match[1];
+    const value = compactSchemeValue(raw);
+    if (value.startsWith('http:') || value.startsWith('https:') || value.startsWith('//') || value.startsWith('javascript:') || value.startsWith('data:')) {
+      addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG CSS references a remote or active resource', { pattern: 'css-external-url' });
+    }
+  }
+}
+
 function scanSvgActiveContent(bytes) {
   const findings = [];
   let text;
@@ -1365,47 +1532,67 @@ function scanSvgActiveContent(bytes) {
     findings.push(finding(ERROR.INVALID_UTF8, 'SVG is not valid UTF-8'));
     return findings;
   }
-  const decoded = decodeXmlEntities(text);
   const addOnce = (code, message, details) => {
     const key = details && (details.pattern || details.token) ? (details.pattern || details.token) : message;
     if (!findings.some((item) => item.code === code && (item.pattern || item.token || item.message) === key)) {
       findings.push(finding(code, message, details));
     }
   };
-  if (/<\s*(?:[a-z_][\w.-]*:)?script\b/i.test(decoded)) {
-    addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains a script element', { pattern: 'script-element' });
-  }
-  if (/<\s*(?:[a-z_][\w.-]*:)?foreignobject\b/i.test(decoded)) {
-    addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains foreignObject HTML embedding', { pattern: 'foreignObject' });
-  }
-  if (/(?:^|[\s<])on[a-z0-9_.:-]+\s*=/i.test(decoded)) {
-    addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains an event handler attribute', { pattern: 'event-handler' });
-  }
-  if (/<!doctype\b/i.test(decoded)) {
+
+  if (/<!doctype\b/i.test(text)) {
     addOnce(ERROR.SVG_XXE, 'SVG contains a DOCTYPE declaration', { pattern: 'doctype' });
   }
-  if (/<!entity\b/i.test(decoded)) {
+  if (/<!entity\b/i.test(text)) {
     addOnce(ERROR.SVG_XXE, 'SVG contains an entity declaration', { pattern: 'entity' });
   }
 
-  const hrefPattern = /(^|[^a-z0-9_.:-])(?:xlink:href|href)\s*=\s*(?:"([^"]*)"|'([^']*)')/gis;
-  for (const match of decoded.matchAll(hrefPattern)) {
-    const value = compactSchemeValue(match[2] === undefined ? (match[3] || '') : match[2]);
-    if (value.startsWith('javascript:') || value.startsWith('data:')) {
-      addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains an active href scheme', { pattern: value.split(':')[0] + '-href' });
+  const remoteReferenceElements = new Set(['use', 'image', 'feimage']);
+  const animationElements = new Set(['set', 'animate', 'animatetransform', 'animatemotion']);
+  for (const tag of scanXmlTags(text)) {
+    const elementName = localXmlName(tag.name);
+    if (tag.processing && elementName === 'xml-stylesheet') {
+      addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains an XML stylesheet processing instruction', { pattern: 'xml-stylesheet' });
+    }
+    if (!tag.processing && !tag.closing) {
+      if (elementName === 'script') {
+        addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains a script element', { pattern: 'script-element' });
+      }
+      if (elementName === 'foreignobject') {
+        addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains foreignObject HTML embedding', { pattern: 'foreignObject' });
+      }
+    }
+
+    const attributes = parseXmlAttributes(tag.raw);
+    for (const attribute of attributes) {
+      if (!tag.processing && /^on[a-z0-9_.:-]*$/i.test(attribute.name)) {
+        addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains an event handler attribute', { pattern: 'event-handler' });
+      }
+      if (attribute.localName === 'href') {
+        const value = compactSchemeValue(attribute.value);
+        if (value.startsWith('javascript:') || value.startsWith('data:')) {
+          addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG contains an active href scheme', { pattern: value.split(':')[0] + '-href' });
+        }
+        if (!tag.processing && remoteReferenceElements.has(elementName) && (value.startsWith('http:') || value.startsWith('https:') || value.startsWith('//'))) {
+          addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG element references a remote resource', { pattern: 'remote-' + elementName });
+        }
+      }
+    }
+
+    if (!tag.processing && animationElements.has(elementName)) {
+      const attributeName = attributes.find((attribute) => attribute.name === 'attributename');
+      if (attributeName && localXmlName(attributeName.value.trim()) === 'href') {
+        for (const attribute of attributes) {
+          if (!['to', 'values', 'from', 'by'].includes(attribute.name)) continue;
+          const value = compactSchemeValue(attribute.value);
+          if (value.includes('javascript:') || value.includes('data:')) {
+            addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG animation assigns an active href scheme', { pattern: 'animated-active-href' });
+          }
+        }
+      }
     }
   }
 
-  const usePattern = /<\s*(?:[a-z_][\w.-]*:)?use\b[^>]*>/gis;
-  for (const match of decoded.matchAll(usePattern)) {
-    const tag = match[0];
-    const hrefMatch = /(?:^|[^a-z0-9_.:-])(?:xlink:href|href)\s*=\s*(?:"([^"]*)"|'([^']*)')/is.exec(tag);
-    if (!hrefMatch) continue;
-    const value = compactSchemeValue(hrefMatch[1] === undefined ? (hrefMatch[2] || '') : hrefMatch[1]);
-    if (value.startsWith('http:') || value.startsWith('https:') || value.startsWith('//')) {
-      addOnce(ERROR.SVG_ACTIVE_CONTENT, 'SVG use element references a remote resource', { pattern: 'remote-use' });
-    }
-  }
+  scanSvgCss(text, addOnce);
   return findings;
 }
 
@@ -1425,6 +1612,58 @@ function pngLogicalEnd(bytes) {
   return -1;
 }
 
+function zeroByteIndex(bytes, start, end) {
+  for (let index = start; index < end; index += 1) {
+    if (bytes[index] === 0) return index;
+  }
+  return -1;
+}
+
+function scanPngCompressedText(bytes, patterns) {
+  const hits = [];
+  if (!bytesEqualAt(bytes, 0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return hits;
+  let position = 8;
+  let outputBytes = 0;
+  for (let chunks = 0; chunks < 1024 && outputBytes < 4194304; chunks += 1) {
+    if (position + 12 > bytes.length) break;
+    const length = u32be(bytes, position);
+    const type = asciiAt(bytes, position + 4, 4);
+    if (!Number.isSafeInteger(length) || length > 0x7fffffff) break;
+    const dataStart = position + 8;
+    const dataEnd = dataStart + length;
+    const end = position + 12 + length;
+    if (end > bytes.length) break;
+    if (type === 'zTXt' || type === 'iTXt') {
+      const keywordEnd = zeroByteIndex(bytes, dataStart, Math.min(dataEnd, dataStart + 80));
+      let compressedStart = -1;
+      if (keywordEnd > dataStart) {
+        if (type === 'zTXt') {
+          if (bytes[keywordEnd + 1] === 0) compressedStart = keywordEnd + 2;
+        } else {
+          const compressionFlag = bytes[keywordEnd + 1];
+          const compressionMethod = bytes[keywordEnd + 2];
+          const languageEnd = zeroByteIndex(bytes, keywordEnd + 3, dataEnd);
+          const translatedEnd = languageEnd === -1 ? -1 : zeroByteIndex(bytes, languageEnd + 1, dataEnd);
+          if (compressionFlag === 1 && compressionMethod === 0 && translatedEnd !== -1) compressedStart = translatedEnd + 1;
+        }
+      }
+      if (compressedStart !== -1 && compressedStart < dataEnd) {
+        try {
+          const inflated = inflateSync(Buffer.from(bytes.buffer, bytes.byteOffset + compressedStart, dataEnd - compressedStart), { maxOutputLength: 1048576 });
+          outputBytes += inflated.length;
+          for (const hit of scanAsciiPatterns(inflated, patterns, 0)) {
+            hits.push({ pattern: hit.pattern, position: dataStart });
+          }
+        } catch {
+        }
+      }
+    }
+    if (type === 'IEND') break;
+    position = end;
+  }
+  return hits;
+}
+
 function findZipSignature(bytes, start) {
   const signatures = [
     [0x50, 0x4b, 0x03, 0x04],
@@ -1442,7 +1681,7 @@ function findZipSignature(bytes, start) {
 function scanActiveAndPolyglot(bytes, sniffed, policy) {
   const findings = [];
   if (policy.scanActiveContent) {
-    if (sniffed.format === 'pdf') findings.push(...scanPdfActiveContent(bytes, policy));
+    if (sniffed.format === 'pdf' || pdfHeaderOffset(bytes) !== -1) findings.push(...scanPdfActiveContent(bytes, policy));
     if (sniffed.format === 'svg') findings.push(...scanSvgActiveContent(bytes));
 
     const patterns = GENERIC_ACTIVE_PATTERNS.filter((pattern) => {
@@ -1450,11 +1689,23 @@ function scanActiveAndPolyglot(bytes, sniffed, policy) {
       if (sniffed.format === 'svg' && (pattern.id === 'script-tag' || pattern.id === 'svg' || pattern.id === 'html-doctype' || pattern.id === 'iframe' || pattern.id === 'object' || pattern.id === 'embed')) return false;
       return true;
     });
+    const activePatterns = new Set();
     for (const hit of scanAsciiPatterns(bytes, patterns, 0)) {
+      activePatterns.add(hit.pattern.id);
       findings.push(finding(ERROR.ACTIVE_CONTENT, 'file bytes contain active markup or server-side code', {
         position: hit.position,
         pattern: hit.pattern.id
       }));
+    }
+    if (sniffed.format === 'png') {
+      for (const hit of scanPngCompressedText(bytes, patterns)) {
+        if (activePatterns.has(hit.pattern.id)) continue;
+        activePatterns.add(hit.pattern.id);
+        findings.push(finding(ERROR.ACTIVE_CONTENT, 'compressed PNG text contains active markup or server-side code', {
+          position: hit.position,
+          pattern: hit.pattern.id
+        }));
+      }
     }
   }
 
@@ -1570,14 +1821,18 @@ function canonicalStorageFilename(report, sniffed, policy) {
 
 function validateUploadInternal(input, policy, transfer = {}) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) invalidInput('upload input must be a plain object', 'input');
-  const bytes = normalizeBytes(input.bytes, 'bytes');
-  const filename = typeof input.filename === 'string' ? input.filename : '';
+  const bytes = normalizeBytes(ownValue(input, 'bytes'), 'bytes');
+  const inputFilename = ownValue(input, 'filename');
+  const filename = typeof inputFilename === 'string' ? inputFilename : '';
   const filenameReport = sanitizeFilename(filename, { maxBytes: policy.maxFilenameBytes });
   const core = inspectBytesCore(bytes, policy, transfer.sizeOverride, transfer.truncated === true);
   const findings = [...core.findings];
   const sniffed = core.sniffed;
+  if (transfer.executableMode === true && !policy.allowExecutables) {
+    findings.push(finding(ERROR.EXECUTABLE_TYPE, 'file has executable permission bits', { actual: 'executable-mode' }));
+  }
 
-  if (typeof input.filename !== 'string') {
+  if (typeof inputFilename !== 'string') {
     findings.push(finding(ERROR.INVALID_INPUT, 'filename must be supplied as a string'));
   }
   for (const item of filenameReport.findings) {
@@ -1592,7 +1847,7 @@ function validateUploadInternal(input, policy, transfer = {}) {
     }));
   }
 
-  const claimed = normalizeClaimedContentType(input.contentType);
+  const claimed = normalizeClaimedContentType(ownValue(input, 'contentType'));
   if (!claimed) {
     if (policy.requireContentType) findings.push(finding(ERROR.CONTENT_TYPE_MISSING, 'Content-Type is required'));
   } else if (!validMimeToken(claimed)) {
@@ -1612,7 +1867,7 @@ function validateUploadInternal(input, policy, transfer = {}) {
   }
 
   if (!sourceExtension) {
-    if (policy.requireExtension && typeof input.filename === 'string') {
+    if (policy.requireExtension && typeof inputFilename === 'string') {
       findings.push(finding(ERROR.EXTENSION_MISSING, 'filename has no extension'));
     }
   } else if (sniffed.format !== 'unknown' && !extensionsEquivalent(sourceExtension, sniffed.ext)) {
@@ -1719,7 +1974,8 @@ function validateFilePath(filePath, policyInput) {
   let fd = null;
   try {
     const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
-    fd = openSync(filePath, fsConstants.O_RDONLY | noFollow);
+    const nonBlock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0;
+    fd = openSync(filePath, fsConstants.O_RDONLY | noFollow | nonBlock);
     const stat = fstatSync(fd);
     if (!stat.isFile()) {
       return pathFailure(filePath, policy, [finding(ERROR.PATH_NOT_REGULAR, 'opened path is not a regular file', { actual: 'non-regular' })], stat.size);
@@ -1746,7 +2002,8 @@ function validateFilePath(filePath, policyInput) {
     if (offset !== size || finalStat.size !== size || metadataChanged) {
       return pathFailure(filePath, policy, [finding(ERROR.PATH_IO_ERROR, 'file changed or truncated while it was being read', { actual: 'unstable-read' })], size);
     }
-    return validateUploadInternal({ bytes: buffer, filename: pathBasename(filePath), contentType: undefined }, policy);
+    const executableMode = process.platform !== 'win32' && (stat.mode & 0o111) !== 0;
+    return validateUploadInternal({ bytes: buffer, filename: pathBasename(filePath), contentType: undefined }, policy, { executableMode });
   } catch {
     return pathFailure(filePath, policy, [finding(ERROR.PATH_IO_ERROR, 'file could not be opened or read safely')]);
   } finally {
@@ -1774,24 +2031,74 @@ function blobFailure(policy, message) {
   }, policy);
 }
 
+function concatenateChunks(chunks, totalBytes) {
+  const output = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return output;
+}
+
+async function readWebStreamWithCap(stream, cap) {
+  if (stream === null || typeof stream !== 'object' || typeof stream.getReader !== 'function') {
+    throw new Error('invalid web stream');
+  }
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (total < cap) {
+      const next = await reader.read();
+      if (next.done) break;
+      const chunk = normalizeBytes(next.value, 'stream chunk');
+      if (chunk.length === 0) continue;
+      const remaining = cap - total;
+      const accepted = chunk.length > remaining ? chunk.slice(0, remaining) : chunk;
+      chunks.push(accepted);
+      total += accepted.length;
+      if (chunk.length > remaining || total >= cap) {
+        try {
+          await reader.cancel('filecage byte cap reached');
+        } catch {
+        }
+        break;
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+    }
+  }
+  return concatenateChunks(chunks, total);
+}
+
 async function validateWebFile(file, policyInput) {
   const policy = normalizePolicy(policyInput);
   if (file === null || typeof file !== 'object') invalidInput('file must be a File or Blob-like object', 'file');
   if (typeof file.arrayBuffer !== 'function') invalidInput('file must expose arrayBuffer()', 'file');
+  const canStream = typeof file.stream === 'function';
+  const canSlice = typeof file.slice === 'function';
+  if (!canStream && !canSlice) {
+    return blobFailure(policy, 'web file does not expose a bounded stream or slice interface');
+  }
   const declaredSize = typeof file.size === 'number' && Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : null;
+  const cap = policy.maxBytes + 1;
   let bytes;
-  let truncated = false;
   try {
-    let source = file;
-    if (declaredSize !== null && declaredSize > policy.maxBytes && typeof file.slice === 'function') {
-      source = file.slice(0, policy.maxBytes + 1);
-      truncated = true;
+    if (canStream) {
+      bytes = await readWebStreamWithCap(file.stream(), cap);
+    } else {
+      const source = file.slice(0, cap);
+      const buffer = await source.arrayBuffer();
+      bytes = normalizeBytes(buffer, 'file bytes');
     }
-    const buffer = await source.arrayBuffer();
-    bytes = normalizeBytes(buffer, 'file bytes');
   } catch {
     return blobFailure(policy, 'web file bytes could not be read');
   }
+  const truncated = bytes.length > policy.maxBytes || (declaredSize !== null && declaredSize > policy.maxBytes);
   const filename = typeof file.name === 'string' ? file.name : 'blob';
   const contentType = typeof file.type === 'string' ? file.type : undefined;
   const effectiveSize = Math.max(bytes.length, declaredSize === null ? bytes.length : declaredSize);

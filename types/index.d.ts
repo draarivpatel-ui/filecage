@@ -179,12 +179,28 @@ export interface FileCageFilenameReport {
   readonly findings: readonly FileCageFinding[];
 }
 
+export interface FileCageWebStreamReadResult {
+  readonly done: boolean;
+  readonly value?: FileCageBytes;
+}
+
+export interface FileCageWebStreamReader {
+  read(): Promise<FileCageWebStreamReadResult>;
+  cancel(reason?: unknown): Promise<void>;
+  releaseLock(): void;
+}
+
+export interface FileCageWebStream {
+  getReader(): FileCageWebStreamReader;
+}
+
 export interface FileCageWebFile {
   readonly size?: number;
   readonly type?: string;
   readonly name?: string;
   arrayBuffer(): Promise<ArrayBuffer>;
   slice?(start?: number, end?: number): FileCageWebFile;
+  stream?(): FileCageWebStream;
 }
 
 export interface FileCageGuard {

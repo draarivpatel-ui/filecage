@@ -256,3 +256,28 @@ test('JPEG arbitrary junk before a marker is rejected rather than skipped', () =
   const withJunk = new Uint8Array([0xff, 0xd8, 0x00, ...valid.slice(2)]);
   assert.equal(inspectImageDimensions(withJunk), null);
 });
+
+test('BMP minimum negative height cannot overflow through absolute value', () => {
+  const bytes = bmp(1, 1);
+  bytes.set([0, 0, 0, 0x80], 22);
+  assert.equal(inspectImageDimensions(bytes), null);
+});
+
+test('PNG dimensions at 0x7fffffff in both axes fail closed instead of overflowing pixels', () => {
+  assert.equal(inspectImageDimensions(png(0x7fffffff, 0x7fffffff)), null);
+});
+
+for (const marker of [0xc4, 0xc8, 0xcc]) {
+  test('JPEG marker 0x' + marker.toString(16).toUpperCase() + ' is not mistaken for a frame header', () => {
+    assert.equal(inspectImageDimensions(jpeg(20, 10, { marker })), null);
+  });
+}
+
+test('extended WebP maximum encoded dimensions use the width and height plus-one encoding correctly', () => {
+  assert.deepEqual(inspectImageDimensions(webpVp8x(0x1000000, 0x1000000)), {
+    format: 'webp',
+    width: 0x1000000,
+    height: 0x1000000,
+    pixels: 0x1000000 * 0x1000000
+  });
+});

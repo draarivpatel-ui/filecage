@@ -18,7 +18,7 @@ function centralEntry(name) {
   ];
 }
 
-function centralOnlyDocx() {
+function centralOnlyZip(names) {
   const local = [
     0x50, 0x4b, 0x03, 0x04,
     ...u16leBytes(20), ...u16leBytes(8), ...u16leBytes(0),
@@ -26,13 +26,17 @@ function centralOnlyDocx() {
     ...u32leBytes(0), ...u32leBytes(0), ...u16leBytes(1), ...u16leBytes(0),
     ...ascii('a')
   ];
-  const central = [...centralEntry('[Content_Types].xml'), ...centralEntry('word/document.xml')];
+  const central = names.flatMap((name) => centralEntry(name));
   const eocd = [
     0x50, 0x4b, 0x05, 0x06,
-    ...u16leBytes(0), ...u16leBytes(0), ...u16leBytes(2), ...u16leBytes(2),
+    ...u16leBytes(0), ...u16leBytes(0), ...u16leBytes(names.length), ...u16leBytes(names.length),
     ...u32leBytes(central.length), ...u32leBytes(local.length), ...u16leBytes(0)
   ];
   return new Uint8Array([...local, ...central, ...eocd]);
+}
+
+function centralOnlyDocx() {
+  return centralOnlyZip(['[Content_Types].xml', 'word/document.xml']);
 }
 
 const signatureCases = [
@@ -55,6 +59,9 @@ const signatureCases = [
   ['DOCX', zip([{ name: '[Content_Types].xml' }, { name: 'word/document.xml' }]), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx', 'document', 'docx', false],
   ['XLSX', zip([{ name: '[Content_Types].xml' }, { name: 'xl/workbook.xml' }]), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx', 'document', 'xlsx', false],
   ['PPTX', zip([{ name: '[Content_Types].xml' }, { name: 'ppt/presentation.xml' }]), 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'pptx', 'document', 'pptx', false],
+  ['DOCM with VBA project', zip([{ name: '[Content_Types].xml' }, { name: 'word/document.xml' }, { name: 'word/vbaProject.bin' }]), 'application/vnd.ms-word.document.macroEnabled.12', 'docm', 'document', 'docm', true],
+  ['XLSM with VBA project', zip([{ name: '[Content_Types].xml' }, { name: 'xl/workbook.xml' }, { name: 'xl/vbaProject.bin' }]), 'application/vnd.ms-excel.sheet.macroEnabled.12', 'xlsm', 'document', 'xlsm', true],
+  ['PPTM with VBA project', zip([{ name: '[Content_Types].xml' }, { name: 'ppt/presentation.xml' }, { name: 'ppt/vbaProject.bin' }]), 'application/vnd.ms-powerpoint.presentation.macroEnabled.12', 'pptm', 'document', 'pptm', true],
   ['JAR', zip([{ name: 'META-INF/MANIFEST.MF', data: 'Manifest-Version: 1.0' }]), 'application/java-archive', 'jar', 'archive', 'jar', false],
   ['GZIP', new Uint8Array([0x1f, 0x8b, 8, 0]), 'application/gzip', 'gz', 'archive', 'gzip', false],
   ['ZSTD', new Uint8Array([0x28, 0xb5, 0x2f, 0xfd, 0x20]), 'application/zstd', 'zst', 'archive', 'zstd', false],
@@ -77,7 +84,12 @@ const signatureCases = [
   ['Mach-O little endian 64-bit', macho([0xcf, 0xfa, 0xed, 0xfe]), 'application/x-mach-binary', 'macho', 'executable', 'macho', true],
   ['Mach-O fat binary', macho([0xca, 0xfe, 0xba, 0xbe]), 'application/x-mach-binary', 'macho', 'executable', 'macho', true],
   ['Mach-O fat 64-bit binary', macho([0xca, 0xfe, 0xba, 0xbf]), 'application/x-mach-binary', 'macho', 'executable', 'macho', true],
+  ['Mach-O byte-swapped fat binary', macho([0xbe, 0xba, 0xfe, 0xca]), 'application/x-mach-binary', 'macho', 'executable', 'macho', true],
+  ['Mach-O byte-swapped fat 64-bit binary', macho([0xbf, 0xba, 0xfe, 0xca]), 'application/x-mach-binary', 'macho', 'executable', 'macho', true],
+  ['Java class sharing CAFEBABE magic', new Uint8Array([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52]), 'application/java-class', 'class', 'executable', 'java-class', true],
   ['shebang script', ascii('#!/bin/sh\nexit 0\n'), 'application/x-shebang', 'sh', 'executable', 'shebang', true],
+  ['UTF-8 BOM before shebang', ascii('\ufeff#!/bin/sh\nexit 0\n'), 'application/x-shebang', 'sh', 'executable', 'shebang', true],
+  ['leading spaces before shebang', ascii('                                                                #!/bin/sh\nexit 0\n'), 'application/x-shebang', 'sh', 'executable', 'shebang', true],
   ['HTML document', ascii('<!doctype html><html><body>x</body></html>'), 'text/html', 'html', 'markup', 'html', false],
   ['HTML fragment', ascii('<script>alert(1)</script>'), 'text/html', 'html', 'markup', 'html', false],
   ['SVG', ascii('<svg xmlns="http://www.w3.org/2000/svg"></svg>'), 'image/svg+xml', 'svg', 'image', 'svg', false],
@@ -101,6 +113,39 @@ for (const [label, bytes, mime, ext, kind, format, executable] of signatureCases
     assert.equal(Object.isFrozen(result), true);
   });
 }
+
+
+for (const padding of [1, 20, 1023]) {
+  test('PDF header is accepted at specification-permitted offset ' + padding, () => {
+    const result = sniffFileType(concatBytes(ascii('x'.repeat(padding)), ascii('%PDF-1.7\n%%EOF')));
+    assert.equal(result.format, 'pdf');
+    assert.equal(result.offset, padding);
+  });
+}
+
+test('PDF header starting after the first 1024 bytes is not accepted as PDF', () => {
+  assert.notEqual(sniffFileType(ascii('x'.repeat(1024) + '%PDF-1.7\n%%EOF')).format, 'pdf');
+});
+
+test('binary garbage before an in-specification PDF header does not hide the PDF', () => {
+  const bytes = concatBytes(new Uint8Array([0, 1, 2, 3]), ascii('%PDF-1.7\n%%EOF'));
+  const result = sniffFileType(bytes);
+  assert.equal(result.format, 'pdf');
+  assert.equal(result.offset, 4);
+});
+
+test('VBA project hidden only in a ZIP central directory is still detected', () => {
+  const result = sniffFileType(centralOnlyZip(['[Content_Types].xml', 'word/document.xml', 'word/vbaProject.bin']));
+  assert.equal(result.format, 'docm');
+  assert.equal(result.executable, true);
+});
+
+test('macro-bearing OOXML is blocked as executable content by default', () => {
+  const bytes = zip([{ name: '[Content_Types].xml' }, { name: 'word/document.xml' }, { name: 'word/vbaProject.bin' }]);
+  const result = validate(bytes, 'document.docm', 'application/vnd.ms-word.document.macroEnabled.12');
+  assert.equal(result.allowed, false);
+  assert.equal(hasFinding(result, 'FILECAGE_EXECUTABLE_TYPE'), true);
+});
 
 test('sniffFileType detects OOXML entries from central directory when local parsing stops', () => {
   assert.equal(sniffFileType(centralOnlyDocx()).format, 'docx');

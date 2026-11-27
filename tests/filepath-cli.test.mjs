@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -328,4 +328,36 @@ test('CLI JSON output can be parsed and contains stable finding codes', () => {
   } finally {
     cleanup(dir);
   }
+});
+
+
+test('validateFilePath rejects executable permission bits on POSIX', { skip: process.platform === 'win32' }, () => {
+  const dir = scratch();
+  try {
+    const target = writeScratch(dir, 'photo.png', png());
+    chmodSync(target, 0o755);
+    const result = validateFilePath(target, 'images-safe');
+    assert.equal(result.allowed, false);
+    assert.equal(result.findings.some((item) => item.code === 'FILECAGE_EXECUTABLE_TYPE' && item.actual === 'executable-mode'), true);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('validateFilePath executable-mode rejection requires explicit executable opt-in', { skip: process.platform === 'win32' }, () => {
+  const dir = scratch();
+  try {
+    const target = writeScratch(dir, 'photo.png', png());
+    chmodSync(target, 0o755);
+    const result = validateFilePath(target, { preset: 'images-safe', allowExecutables: true });
+    assert.equal(result.allowed, true, JSON.stringify(result.findings));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('CLI error output strips terminal bidi controls', () => {
+  const result = runCli(['inspect', 'a.png', '--bad\u202eoption']);
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr.includes('\u202e'), false);
 });

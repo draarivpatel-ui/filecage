@@ -28,11 +28,12 @@ Start with a written parser boundary in the pull request. Parse only static
 metadata needed for dimensions, never compressed imagery. Reject ambiguous or
 truncated boxes and add strict bounds tests.
 
-## 5. Expand OOXML macro-active rejection
+## 5. Add OOXML external-relationship detection
 
-Keep macro-free DOCX, XLSX, and PPTX detection while detecting `vbaProject.bin`
-and active object names in ZIP entries. Add a policy option that defaults to
-rejecting macro-bearing office files.
+Keep macro-free DOCX, XLSX, and PPTX detection while inspecting relationship
+part names and bounded XML relationship content for external targets. Never
+fetch those targets. Define separate findings for external links and embedded
+remote objects, with strict truncation tests.
 
 ## 6. Add archive central-directory consistency checks
 

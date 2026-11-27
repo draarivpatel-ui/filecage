@@ -296,3 +296,55 @@ test('sanitizeFilename report is frozen', () => {
   assert.equal(Object.isFrozen(report), true);
   assert.equal(Object.isFrozen(report.findings), true);
 });
+
+test('Arabic letter mark U+061C is rejected and removed as a bidi control', () => {
+  const input = 'a\u061cb.png';
+  const report = sanitizeFilename(input);
+  assert.equal(report.findings.some((item) => item.code === 'FILECAGE_FILENAME_BIDI'), true);
+  assert.equal(report.filename, 'ab.png');
+});
+
+for (const input of ['CON .png', 'con .txt', 'LPT1 .png']) {
+  test('reserved Windows device with a space before the extension is rejected: ' + input, () => {
+    const report = sanitizeFilename(input);
+    assert.equal(report.findings.some((item) => item.code === 'FILECAGE_FILENAME_RESERVED_DEVICE'), true);
+  });
+}
+
+test('reserved Windows device stream syntax is rejected before colon neutralization', () => {
+  const report = sanitizeFilename('NUL:evil');
+  assert.equal(report.findings.some((item) => item.code === 'FILECAGE_FILENAME_RESERVED_DEVICE'), true);
+  assert.equal(report.findings.some((item) => item.code === 'FILECAGE_FILENAME_UNSAFE_CHAR'), true);
+});
+
+for (const input of ['.env', '.htaccess', '.gitconfig']) {
+  test('dotfile is rejected rather than silently stripped: ' + input, () => {
+    const report = sanitizeFilename(input);
+    assert.equal(report.findings.some((item) => item.code === 'FILECAGE_FILENAME_DOT_NAME'), true);
+    assert.equal(report.filename.startsWith('.'), false);
+    assert.throws(() => assertSafeFilename(input), (error) => error.code === 'FILECAGE_FILENAME_DOT_NAME');
+  });
+}
+
+for (const input of ['a.png.exe ', 'a.png.exe.', 'a.png .exe']) {
+  test('Windows-normalized active double extension is neutralized: ' + JSON.stringify(input), () => {
+    const report = sanitizeFilename(input);
+    assert.equal(report.findings.some((item) => item.code === 'FILECAGE_FILENAME_DOUBLE_EXTENSION'), true);
+    assert.equal(report.filename, 'a_png.exe');
+  });
+}
+
+test('a very long extension cannot bypass the UTF-8 byte cap', () => {
+  for (const maxBytes of [32, 64, 255]) {
+    const report = sanitizeFilename('a.' + 'x'.repeat(400), { maxBytes });
+    assert.equal(report.byteLength <= maxBytes, true, String(maxBytes));
+    assert.equal(Buffer.byteLength(report.filename, 'utf8'), report.byteLength);
+  }
+});
+
+test('a very long multibyte extension cannot bypass the UTF-8 byte cap or split a character', () => {
+  const report = sanitizeFilename('a.' + 'π'.repeat(200), { maxBytes: 64 });
+  assert.equal(report.byteLength <= 64, true);
+  assert.equal(Buffer.byteLength(report.filename, 'utf8'), report.byteLength);
+  assert.equal(report.filename.includes('\ufffd'), false);
+});

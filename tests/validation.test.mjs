@@ -504,21 +504,96 @@ test('finding list remains stable across repeated validation of the same bytes',
   assert.equal(first.sha256, second.sha256);
 });
 
-test('validateWebFile uses actual bytes when declared size is dishonestly small', async () => {
+test('validateWebFile fails closed without calling an unbounded arrayBuffer-only source', async () => {
   const bytes = png();
+  let arrayBufferCalls = 0;
   const file = {
     size: 1,
     type: 'image/png',
     name: 'photo.png',
-    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    arrayBuffer: async () => {
+      arrayBufferCalls += 1;
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
   };
   const result = await validateWebFile(file, { maxBytes: bytes.length - 1 });
-  assert.equal(result.sizeBytes, bytes.length);
-  assert.equal(hasFinding(result, 'FILECAGE_MAX_BYTES'), true);
+  assert.equal(arrayBufferCalls, 0);
+  assert.equal(result.allowed, false);
+  assert.equal(hasFinding(result, 'FILECAGE_IO_ERROR'), true);
 });
 
 test('guard per-call preset string overrides are accepted', () => {
   const guard = createUploadGuard('documents-safe');
   const result = guard.validateUpload({ bytes: png(), filename: 'x.png', contentType: 'image/png' }, 'images-safe');
   assert.equal(result.allowed, true);
+});
+
+
+test('validateWebFile uses slice to cap reads even when declared size is dishonestly small', async () => {
+  const bytes = ascii('a'.repeat(1000));
+  const sliceCalls = [];
+  const make = (part) => ({
+    size: 1,
+    type: 'text/plain',
+    name: 'notes.txt',
+    arrayBuffer: async () => part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength),
+    slice: (start = 0, end = part.length) => {
+      sliceCalls.push([start, end]);
+      return make(part.slice(start, end));
+    }
+  });
+  const result = await validateWebFile(make(bytes), { maxBytes: 100 });
+  assert.deepEqual(sliceCalls, [[0, 101]]);
+  assert.equal(result.sizeBytes, 101);
+  assert.equal(result.sha256, null);
+  assert.equal(hasFinding(result, 'FILECAGE_MAX_BYTES'), true);
+});
+
+test('validateWebFile prefers a bounded stream and does not call arrayBuffer', async () => {
+  const bytes = ascii('a'.repeat(1000));
+  let arrayBufferCalls = 0;
+  const file = {
+    size: 1,
+    type: 'text/plain',
+    name: 'notes.txt',
+    arrayBuffer: async () => {
+      arrayBufferCalls += 1;
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    },
+    stream: () => new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, 500));
+        controller.enqueue(bytes.slice(500));
+        controller.close();
+      }
+    })
+  };
+  const result = await validateWebFile(file, { maxBytes: 100 });
+  assert.equal(arrayBufferCalls, 0);
+  assert.equal(result.sizeBytes, 101);
+  assert.equal(result.sha256, null);
+  assert.equal(hasFinding(result, 'FILECAGE_MAX_BYTES'), true);
+});
+
+test('inherited policy properties do not weaken validation defaults', () => {
+  const inheritedPolicy = Object.create({
+    preset: 'media-safe',
+    allowedMimeTypes: ['image/jpeg'],
+    maxBytes: 1,
+    scanActiveContent: false,
+    allowUnknownTypes: true
+  });
+  const result = validate(png(), 'photo.png', 'image/png', inheritedPolicy);
+  assert.equal(result.allowed, true, JSON.stringify(result.findings));
+  const guard = createUploadGuard(inheritedPolicy);
+  assert.equal(guard.policy.preset, 'default');
+  assert.equal(guard.policy.maxBytes, 10485760);
+  assert.equal(guard.policy.scanActiveContent, true);
+  assert.equal(guard.policy.allowUnknownTypes, false);
+  assert.equal(guard.policy.allowedMimeTypes, null);
+});
+
+test('inherited upload input properties are not trusted as own input', () => {
+  const inheritedInput = Object.create({ bytes: png(), filename: 'photo.png', contentType: 'image/png' });
+  assert.throws(() => validateUpload(inheritedInput), (error) => error.code === 'FILECAGE_INVALID_INPUT');
 });

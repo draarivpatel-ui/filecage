@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { validateUpload } from '../src/index.mjs';
-import { ascii, concatBytes, png, jpeg, gif, webpVp8, bmp, pdf, svg, validate, hasFinding, findingCodes } from './helpers.mjs';
+import { ascii, concatBytes, png, jpeg, gif, webpVp8, bmp, pdf, svg, u32beBytes, validate, hasFinding, findingCodes } from './helpers.mjs';
 
 function validateSvg(bytes, policy = {}) {
   return validateUpload({ bytes, filename: 'image.svg', contentType: 'image/svg+xml' }, { allowSvg: true, ...policy });
@@ -269,4 +269,107 @@ test('HTML containing inline SVG is rejected as embedded active content', () => 
   const result = validate(ascii('<html><body><svg onload="alert(1)"></svg></body></html>'), 'page.html', 'text/html', { allowMarkup: true });
   assert.equal(result.allowed, false);
   assert.equal(result.findings.some((item) => item.code === 'FILECAGE_ACTIVE_CONTENT' && item.pattern === 'svg'), true);
+});
+
+
+test('SVG slash-separated event attribute is rejected conservatively', () => {
+  const result = validateSvg(ascii('<svg/onload=alert(1)>'));
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.pattern === 'event-handler'), true);
+});
+
+for (const [label, element] of [
+  ['set element', '<set attributeName="href" to="javascript:alert(1)"/>'],
+  ['animate element', '<animate attributeName="xlink:href" values="none;javascript:alert(1)"/>'],
+  ['entity-encoded set value', '<set attributeName="href" to="java&#x73;cript:alert(1)"/>']
+]) {
+  test('SVG animation cannot assign an active href: ' + label, () => {
+    const result = validateSvg(svg(element));
+    assert.equal(result.allowed, false);
+    assert.equal(result.findings.some((item) => item.pattern === 'animated-active-href'), true);
+  });
+}
+
+for (const [label, element, pattern] of [
+  ['remote image', '<image href="https://example.invalid/pixel.png"/>', 'remote-image'],
+  ['remote feImage', '<feImage href="https://example.invalid/pixel.png"/>', 'remote-feimage'],
+  ['remote use with raw greater-than in URL', '<use href="https://example.invalid/a>b"/>', 'remote-use'],
+  ['remote use with entity greater-than in URL', '<use href="https://example.invalid/a&gt;b"/>', 'remote-use']
+]) {
+  test('SVG remote resource is rejected: ' + label, () => {
+    const result = validateSvg(svg(element));
+    assert.equal(result.allowed, false);
+    assert.equal(result.findings.some((item) => item.pattern === pattern), true);
+  });
+}
+
+for (const [label, css] of [
+  ['stylesheet import', '@import url(https://example.invalid/a.css)'],
+  ['CSS-escaped stylesheet import', '@im\\70 ort url(https://example.invalid/a.css)'],
+  ['external CSS url', 'rect { fill: url(https://example.invalid/a.png) }'],
+  ['CSS-escaped external url', 'rect { fill: u\\72 l(https://example.invalid/a.png) }']
+]) {
+  test('SVG CSS network access is rejected: ' + label, () => {
+    const result = validateSvg(svg('<style>' + css + '</style>'));
+    assert.equal(result.allowed, false);
+    assert.equal(result.findings.some((item) => item.pattern === 'css-import' || item.pattern === 'css-external-url'), true);
+  });
+}
+
+test('SVG XML stylesheet processing instruction is rejected', () => {
+  const bytes = ascii('<?xml-stylesheet href="style.xsl"?><svg xmlns="http://www.w3.org/2000/svg"/>');
+  const result = validateSvg(bytes);
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.pattern === 'xml-stylesheet'), true);
+});
+
+test('entity-encoded script text inside a text node remains inert and does not false-positive', () => {
+  const result = validateSvg(svg('<text>&lt;script&gt; example</text>'));
+  assert.equal(result.allowed, true, JSON.stringify(result.findings));
+});
+
+test('PDF plural EmbeddedFiles name is rejected', () => {
+  const result = validatePdf(pdf('2 0 obj << /EmbeddedFiles true >> endobj'));
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.token === '/EMBEDDEDFILES'), true);
+});
+
+test('PDF active names are scanned when the PDF header is offset by leading garbage', () => {
+  const bytes = concatBytes(ascii('leading garbage\n'), pdf('2 0 obj << /JavaScript true >> endobj'));
+  const result = validatePdf(bytes);
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.token === '/JAVASCRIPT'), true);
+});
+
+function pngChunk(type, payload) {
+  return new Uint8Array([...u32beBytes(payload.length), ...ascii(type), ...payload, 0, 0, 0, 0]);
+}
+
+function insertBeforePngIend(base, insert) {
+  return concatBytes(base.slice(0, -12), insert, base.slice(-12));
+}
+
+function compressedTextPng(type) {
+  const keyword = ascii('comment');
+  const compressed = deflateSync(ascii('<script>alert(1)</script>'));
+  const payload = type === 'zTXt'
+    ? new Uint8Array([...keyword, 0, 0, ...compressed])
+    : new Uint8Array([...keyword, 0, 1, 0, 0, 0, ...compressed]);
+  return insertBeforePngIend(png(), pngChunk(type, payload));
+}
+
+for (const type of ['zTXt', 'iTXt']) {
+  test('active payload compressed inside PNG ' + type + ' metadata is rejected', () => {
+    const result = validateImage(compressedTextPng(type), 'image.png', 'image/png');
+    assert.equal(result.allowed, false);
+    assert.equal(result.findings.some((item) => item.code === 'FILECAGE_ACTIVE_CONTENT' && item.pattern === 'script-tag'), true);
+  });
+}
+
+test('inert compressed PNG zTXt metadata does not false-positive', () => {
+  const keyword = ascii('comment');
+  const compressed = deflateSync(ascii('ordinary metadata'));
+  const bytes = insertBeforePngIend(png(), pngChunk('zTXt', new Uint8Array([...keyword, 0, 0, ...compressed])));
+  const result = validateImage(bytes, 'image.png', 'image/png');
+  assert.equal(result.allowed, true, JSON.stringify(result.findings));
 });
