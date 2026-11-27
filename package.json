@@ -1,0 +1,68 @@
+{
+  "name": "filecage",
+  "version": "1.0.0",
+  "description": "Zero-dependency CWE-434 upload defense with magic-byte verification, spoofing detection, polyglot rejection, pixel-bomb guards, and filename sanitization",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/draarivpatel-ui/filecage.git"
+  },
+  "homepage": "https://github.com/draarivpatel-ui/filecage#readme",
+  "bugs": {
+    "url": "https://github.com/draarivpatel-ui/filecage/issues"
+  },
+  "type": "module",
+  "main": "./cjs/index.cjs",
+  "module": "./src/index.mjs",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./src/index.mjs",
+      "require": "./cjs/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "filecage": "bin/filecage.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "cjs",
+    "types",
+    "docs",
+    "README.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:cjs": "node scripts/build-cjs.mjs",
+    "check:cjs": "node scripts/build-cjs.mjs --check",
+    "smoke": "node scripts/cli-smoke.mjs",
+    "test": "node scripts/run-tests.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "security",
+    "file-upload",
+    "cwe-434",
+    "magic-bytes",
+    "mime-sniffing",
+    "polyglot",
+    "svg-xss",
+    "xxe",
+    "pixel-bomb",
+    "decompression-bomb",
+    "filename-sanitization",
+    "rtlo",
+    "zero-dependency",
+    "nodejs"
+  ],
+  "license": "MIT",
+  "sideEffects": false,
+  "dependencies": {},
+  "devDependencies": {}
+}

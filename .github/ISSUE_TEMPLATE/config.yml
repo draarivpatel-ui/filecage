@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reports
+    url: https://github.com/draarivpatel-ui/filecage/security/advisories/new
+    about: Report exploitable vulnerabilities privately rather than in a public issue.

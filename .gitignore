@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tgz
+coverage/
+.nyc_output/
+.DS_Store
+.test-tmp/
