@@ -373,3 +373,194 @@ test('inert compressed PNG zTXt metadata does not false-positive', () => {
   const result = validateImage(bytes, 'image.png', 'image/png');
   assert.equal(result.allowed, true, JSON.stringify(result.findings));
 });
+
+
+function compressedTextChunkPayload(type, compressed) {
+  const keyword = ascii('comment');
+  return type === 'zTXt'
+    ? new Uint8Array([...keyword, 0, 0, ...compressed])
+    : new Uint8Array([...keyword, 0, 1, 0, 0, 0, ...compressed]);
+}
+
+for (const type of ['zTXt', 'iTXt']) {
+  test('PNG compressed ' + type + ' metadata beyond the inflate cap fails closed', () => {
+    const inflatedBeyondCap = new Uint8Array(1048577).fill(65);
+    const compressed = deflateSync(inflatedBeyondCap);
+    const payload = compressedTextChunkPayload(type, compressed);
+    const bytes = insertBeforePngIend(png(), pngChunk(type, payload));
+    const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+    assert.equal(result.allowed, false);
+    assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  });
+}
+
+test('PNG compressed text metadata beyond the chunk scan cap fails closed', () => {
+  const compressed = deflateSync(ascii('ordinary metadata'));
+  const chunk = pngChunk('zTXt', compressedTextChunkPayload('zTXt', compressed));
+  const chunks = [];
+  for (let index = 0; index < 1025; index += 1) chunks.push(chunk);
+  const bytes = insertBeforePngIend(png(), concatBytes(...chunks));
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(result.allowed, false);
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+});
+
+
+test('PNG compressed text metadata beyond the cumulative inflate cap fails closed', () => {
+  const compressed = deflateSync(new Uint8Array(1048576).fill(65));
+  const chunk = pngChunk('zTXt', compressedTextChunkPayload('zTXt', compressed));
+  const bytes = insertBeforePngIend(png(), concatBytes(chunk, chunk, chunk, chunk, chunk));
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(result.allowed, false);
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+});
+
+test('PNG binary signature scanning does not inflate metadata beyond the shared cumulative cap', () => {
+  const benignCompressed = deflateSync(new Uint8Array(1048576).fill(65));
+  const hostileInflated = new Uint8Array(1048576).fill(65);
+  hostileInflated.set([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00], 0);
+  const hostileCompressed = deflateSync(hostileInflated);
+  const benignChunk = pngChunk('zTXt', compressedTextChunkPayload('zTXt', benignCompressed));
+  const hostileChunk = pngChunk('zTXt', compressedTextChunkPayload('zTXt', hostileCompressed));
+  const bytes = insertBeforePngIend(png(), concatBytes(benignChunk, benignChunk, benignChunk, benignChunk, hostileChunk));
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(result.allowed, false);
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  assert.equal(result.findings.some((item) => item.pattern === 'elf-executable'), false);
+});
+
+for (const type of ['zTXt', 'iTXt']) {
+  test('undecodable compressed PNG ' + type + ' metadata fails closed', () => {
+    const payload = compressedTextChunkPayload(type, ascii('not a deflate stream'));
+    const bytes = insertBeforePngIend(png(), pngChunk(type, payload));
+    const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+    assert.equal(result.allowed, false);
+    assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  });
+}
+
+
+
+test('truncated PNG chunk before IEND fails closed', () => {
+  const truncatedChunk = new Uint8Array([...u32beBytes(8), ...ascii('zTXt'), 1, 2]);
+  const bytes = concatBytes(png(1, 1, { iend: false }), truncatedChunk);
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  assert.equal(result.allowed, false);
+});
+
+test('PNG zTXt missing keyword terminator fails closed', () => {
+  const bytes = insertBeforePngIend(png(), pngChunk('zTXt', ascii('comment')));
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  assert.equal(result.allowed, false);
+});
+
+test('PNG zTXt unsupported compression method fails closed', () => {
+  const compressed = deflateSync(ascii('ordinary metadata'));
+  const payload = new Uint8Array([...ascii('comment'), 0, 1, ...compressed]);
+  const bytes = insertBeforePngIend(png(), pngChunk('zTXt', payload));
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  assert.equal(result.allowed, false);
+});
+
+test('compressed PNG iTXt missing framing delimiters fails closed', () => {
+  const payload = new Uint8Array([...ascii('comment'), 0, 1, 0]);
+  const bytes = insertBeforePngIend(png(), pngChunk('iTXt', payload));
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  assert.equal(result.allowed, false);
+});
+
+test('compressed PNG iTXt unsupported compression method fails closed', () => {
+  const compressed = deflateSync(ascii('ordinary metadata'));
+  const payload = new Uint8Array([...ascii('comment'), 0, 1, 1, 0, 0, ...compressed]);
+  const bytes = insertBeforePngIend(png(), pngChunk('iTXt', payload));
+  const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+  assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+  assert.equal(result.allowed, false);
+});
+
+for (const type of ['zTXt', 'iTXt']) {
+  test('PNG compressed ' + type + ' metadata with trailing unread zlib bytes fails closed', () => {
+    const first = deflateSync(ascii('ordinary metadata'));
+    const second = deflateSync(ascii('second stream'));
+    const payload = compressedTextChunkPayload(type, concatBytes(first, second));
+    const bytes = insertBeforePngIend(png(), pngChunk(type, payload));
+    const result = validateImage(bytes, 'image.png', 'image/png', 'images-safe');
+    assert.equal(hasFinding(result, 'FILECAGE_PNG_SCAN_LIMIT'), true);
+    assert.equal(result.allowed, false);
+  });
+}
+
+function textChunkPng(type, text, compress) {
+  const keyword = ascii('comment');
+  const body = compress ? deflateSync(ascii(text)) : ascii(text);
+  const payload = type === 'tEXt'
+    ? new Uint8Array([...keyword, 0, ...ascii(text)])
+    : type === 'zTXt'
+      ? new Uint8Array([...keyword, 0, 0, ...body])
+      : new Uint8Array([...keyword, 0, compress ? 1 : 0, 0, 0, 0, ...body]);
+  return insertBeforePngIend(png(), pngChunk(type, payload));
+}
+
+test('PDF inside uncompressed PNG tEXt metadata is rejected as a polyglot', () => {
+  const result = validateImage(textChunkPng('tEXt', '%PDF-1.7\n%%EOF', false), 'image.png', 'image/png');
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'pdf-signature'), true);
+});
+
+test('PDF inside uncompressed PNG iTXt metadata is rejected as a polyglot', () => {
+  const result = validateImage(textChunkPng('iTXt', '%PDF-1.7\n%%EOF', false), 'image.png', 'image/png');
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'pdf-signature'), true);
+});
+
+for (const type of ['zTXt', 'iTXt']) {
+  test('PDF compressed inside PNG ' + type + ' metadata is rejected as a polyglot', () => {
+    const result = validateImage(textChunkPng(type, '%PDF-1.7\n%%EOF', true), 'image.png', 'image/png');
+    assert.equal(result.allowed, false);
+    assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'pdf-signature'), true);
+  });
+}
+
+test('PDF inside inflated PNG image data is rejected as a polyglot', () => {
+  const compressed = deflateSync(ascii('pixel-prefix-%PDF-1.7\n%%EOF'));
+  const bytes = insertBeforePngIend(png(1, 1, { idat: false }), pngChunk('IDAT', new Uint8Array(compressed)));
+  const result = validateImage(bytes, 'image.png', 'image/png');
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'pdf-signature'), true);
+});
+
+test('PDF after PNG IEND is rejected as both trailing data and a polyglot', () => {
+  const result = validateImage(png(1, 1, { trailing: ascii('%PDF-1.7\n%%EOF') }), 'image.png', 'image/png');
+  assert.equal(result.allowed, false);
+  assert.equal(hasFinding(result, 'FILECAGE_TRAILING_DATA'), true);
+  assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'pdf-signature'), true);
+});
+
+test('ELF executable magic inside PNG metadata is rejected as a structured binary polyglot', () => {
+  const result = validateImage(textChunkPng('tEXt', '\x7fELF\x02\x01\x01\x00', false), 'image.png', 'image/png');
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'elf-executable'), true);
+});
+
+test('ELF executable magic inside compressed PNG metadata is rejected as a structured binary polyglot', () => {
+  const result = validateImage(textChunkPng('zTXt', '\x7fELF\x02\x01\x01\x00', true), 'image.png', 'image/png');
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'elf-executable'), true);
+});
+
+test('ELF-shaped inflated PNG pixels do not count as executable metadata', () => {
+  const compressed = deflateSync(new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0]));
+  const bytes = insertBeforePngIend(png(1, 1, { idat: false }), pngChunk('IDAT', new Uint8Array(compressed)));
+  const result = validateImage(bytes, 'image.png', 'image/png');
+  assert.equal(result.findings.some((item) => item.pattern === 'elf-executable'), false);
+});
+
+test('HTML document root inside PNG metadata is rejected as a polyglot', () => {
+  const result = validateImage(textChunkPng('tEXt', '<html><body>x</body></html>', false), 'image.png', 'image/png');
+  assert.equal(result.allowed, false);
+  assert.equal(result.findings.some((item) => item.code === 'FILECAGE_POLYGLOT' && item.pattern === 'html-root'), true);
+});

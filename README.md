@@ -53,14 +53,14 @@ file is harmless in every possible viewer.
 | Path traversal through slash, backslash, dot, or empty filenames | CWE-22 | Path separators are never preserved. Dot aliases, empty names, controls, NUL, trailing dots, and trailing spaces are rejected by default. |
 | Windows device names such as `CON`, `NUL`, `COM1`, `LPT1`, and superscript variants | CWE-22 | Reserved names are detected case-insensitively after Unicode compatibility normalization and neutralized. |
 | Double-extension attacks such as `invoice.pdf.exe` or `avatar.png.php` | CWE-434 | Active final extensions after a plausible document or image extension are flagged and normalized. |
-| GIFAR, JPEG plus ZIP, and similar image archive polyglots | CWE-434 | Raster images are scanned for ZIP local-header and end-of-central-directory signatures. PNG trailing bytes after IEND reject the file. Compressed PNG zTXt and iTXt metadata is inflated with strict output caps and scanned for active payloads. |
+| GIFAR, JPEG plus ZIP, PNG plus PDF, and similar image document or archive polyglots | CWE-434 | Raster images are scanned for ZIP local-header and end-of-central-directory signatures plus embedded PDF and HTML/XML document signatures. Executable, zstd, OLE, and SQLite signatures are scanned only in structurally meaningful regions: PNG ancillary metadata and trailing bytes, plus trailing bytes of JPEG, WebP, and BMP images. PNG trailing bytes after IEND reject the file. Compressed PNG zTXt and iTXt metadata is inflated with strict output caps and scanned for active payloads, and inflated PNG image data is scanned for active and document signatures. If chunk limits, inflation caps, malformed chunk framing, incomplete stream consumption, or inflate errors prevent complete compressed text scanning, validation fails closed with `FILECAGE_PNG_SCAN_LIMIT`. |
 | SVG script execution, event handlers, active hrefs, animated href assignment, `foreignObject`, remote `<use>` or image references, stylesheet processing instructions, and CSS network access | CWE-79 | SVG is blocked by default. Explicit opt-in still requires the active-content scan to pass. |
 | SVG XML external entities and entity declarations | CWE-611 | DOCTYPE and ENTITY declarations reject the upload. |
 | PDF JavaScript, launch actions, automatic actions, singular or plural embedded-file names, and URI actions | CWE-434 | PDF headers are accepted at the specification-permitted offset within the first 1024 bytes. PDF names are decoded, including hex-escaped names. Flate-compressed object streams are inflated with strict output caps and scanned. URI rejection can be configured. |
 | PNG, JPEG, GIF, WebP, and BMP pixel floods and decompression bombs | CWE-400 | Width, height, and total pixels are read from binary headers and capped before any image decoder is invoked. |
 | Malformed JPEG marker loops and truncated image headers | CWE-400 | The marker walker is iterative, bounded, monotonic, and rejects impossible lengths. |
 | Unknown binary content | CWE-434 | Strict UTF-8 and magic-byte detection fail closed unless unknown types are explicitly enabled. |
-| FIFOs, devices, sockets, directories, symlinks, executable-mode files, and oversized paths | CWE-59 / CWE-400 / CWE-434 | Path validation uses `lstat`, regular-file checks, `O_NOFOLLOW` and `O_NONBLOCK` where available, descriptor `fstat`, POSIX executable-mode rejection, size checks before reading, and a post-read stability check. |
+| FIFOs, devices, sockets, directories, final-component and intermediate symlinks, executable-mode files, and oversized paths | CWE-59 / CWE-400 / CWE-434 | Path validation walks intermediate components with `lstat` using component forms that never carry a trailing separator, uses regular-file checks, `O_NOFOLLOW` and `O_NONBLOCK` where available, descriptor `fstat`, POSIX executable-mode rejection, size checks before reading, a post-read component recheck, and a post-read stability check. The root-owned macOS `/tmp` and `/var` compatibility aliases are the only permitted intermediate symlinks. |
 | Terminal control and bidirectional-text injection through filenames in CLI output | CWE-117 | The CLI removes terminal control characters and Unicode bidi controls before printing names. |
 
 ## What filecage does not do
@@ -275,9 +275,20 @@ when bytes came from a trusted object store key rather than a multipart upload.
 
 Inspects a local path using `lstat`, regular-file checks, `O_NOFOLLOW` and
 `O_NONBLOCK` where the platform supports them, descriptor `fstat`, a size cap
-before reading, bounded reads, and a post-read stability check. It rejects
-directories, symlinks, FIFOs, devices, sockets, unstable files, oversized
-files, and files with POSIX executable permission bits.
+before reading, bounded reads, and a post-read stability check. Every
+intermediate directory component is checked with `lstat` before the read and
+rechecked afterward. It rejects directories, final-component and intermediate
+symlinks, FIFOs, devices, sockets, unstable files, oversized files, and files
+with POSIX executable permission bits. On macOS only the root-owned `/tmp` and
+`/var` compatibility aliases are tolerated because the system uses them for
+the standard temporary directory roots. Repeated separators in a supplied path cannot
+turn a component inspection into a trailing-separator symlink dereference.
+
+The before-read and after-read component walks are consistency checks, not
+descriptor-relative traversal. A local attacker who can concurrently replace
+directories can still race those checks on platforms without descriptor-relative
+path opening. Treat this API as a validation filter, not as protection against
+an active local filesystem attacker.
 
 ### `validateWebFile(file, policy)`
 
@@ -333,10 +344,11 @@ hostile one.
 | `FILECAGE_MAX_HEIGHT` | Image height exceeds the cap. |
 | `FILECAGE_MAX_PIXELS` | Image pixel count exceeds the cap. |
 | `FILECAGE_ACTIVE_CONTENT` | Active markup or server-side code was found in file bytes. |
-| `FILECAGE_POLYGLOT` | A raster image contains a ZIP or JAR signature. |
+| `FILECAGE_POLYGLOT` | A raster image contains a ZIP, JAR, document, executable, or archive-container signature. |
 | `FILECAGE_TRAILING_DATA` | A PNG contains bytes after IEND. |
 | `FILECAGE_PDF_ACTIVE_CONTENT` | A PDF active action was found. |
 | `FILECAGE_PDF_SCAN_LIMIT` | A compressed PDF object scan hit a safety limit or malformed stream. |
+| `FILECAGE_PNG_SCAN_LIMIT` | A compressed PNG text scan hit a safety limit, malformed framing, or an inflate error before all compressed metadata was scanned. |
 | `FILECAGE_SVG_ACTIVE_CONTENT` | SVG contains script, events, active hrefs, foreignObject, or remote use. |
 | `FILECAGE_SVG_XXE` | SVG contains DOCTYPE or ENTITY syntax. |
 | `FILECAGE_FILENAME_EMPTY` | Filename is empty. |

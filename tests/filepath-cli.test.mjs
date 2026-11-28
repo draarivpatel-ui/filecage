@@ -148,6 +148,55 @@ test('validateFilePath rejects symbolic links', { skip: process.platform === 'wi
   }
 });
 
+test('validateFilePath rejects a symlink in an intermediate directory', { skip: process.platform === 'win32' }, () => {
+  const dir = scratch();
+  try {
+    const realDirectory = path.join(dir, 'real');
+    mkdirSync(realDirectory);
+    writeFileSync(path.join(realDirectory, 'plain.png'), png());
+    symlinkSync(realDirectory, path.join(dir, 'linkdir'), 'dir');
+    const result = validateFilePath(path.join(dir, 'linkdir', 'plain.png'), 'images-safe');
+    assert.equal(result.allowed, false);
+    assert.equal(hasFinding(result, 'FILECAGE_PATH_SYMLINK'), true);
+    assert.equal(result.sha256, null);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+for (const separatorCount of [2, 3]) {
+  test('validateFilePath rejects an intermediate symlink behind repeated separators count ' + separatorCount, { skip: process.platform === 'win32' }, () => {
+    const dir = scratch();
+    try {
+      const realDirectory = path.join(dir, 'real');
+      mkdirSync(realDirectory);
+      writeFileSync(path.join(realDirectory, 'plain.png'), png());
+      symlinkSync(realDirectory, path.join(dir, 'linkdir'), 'dir');
+      const separated = path.join(dir, 'linkdir') + '/'.repeat(separatorCount) + 'plain.png';
+      const result = validateFilePath(separated, 'images-safe');
+      assert.equal(result.allowed, false);
+      assert.equal(hasFinding(result, 'FILECAGE_PATH_SYMLINK'), true);
+      assert.equal(result.sha256, null);
+    } finally {
+      cleanup(dir);
+    }
+  });
+}
+
+test('validateFilePath accepts regular intermediate directories', { skip: process.platform === 'win32' }, () => {
+  const dir = scratch();
+  try {
+    const nested = path.join(dir, 'real', 'nested');
+    mkdirSync(nested, { recursive: true });
+    const target = path.join(nested, 'plain.png');
+    writeFileSync(target, png());
+    const result = validateFilePath(target, 'images-safe');
+    assert.equal(result.allowed, true, JSON.stringify(result.findings));
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test('validateFilePath rejects FIFOs without blocking on open', { skip: process.platform === 'win32' }, () => {
   const dir = scratch();
   try {

@@ -6,7 +6,8 @@
  * scripts/build-cjs.mjs.
  */
 
-import { openSync, closeSync, readSync, fstatSync, lstatSync, constants as fsConstants } from 'node:fs';
+import { openSync, closeSync, readSync, fstatSync, lstatSync, readlinkSync, constants as fsConstants } from 'node:fs';
+import { dirname, parse as parsePath } from 'node:path';
 import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 
@@ -38,6 +39,7 @@ export const FILECAGE_ERROR_CODES = Object.freeze({
   TRAILING_DATA: 'FILECAGE_TRAILING_DATA',
   PDF_ACTIVE_CONTENT: 'FILECAGE_PDF_ACTIVE_CONTENT',
   PDF_SCAN_LIMIT: 'FILECAGE_PDF_SCAN_LIMIT',
+  PNG_SCAN_LIMIT: 'FILECAGE_PNG_SCAN_LIMIT',
   SVG_ACTIVE_CONTENT: 'FILECAGE_SVG_ACTIVE_CONTENT',
   SVG_XXE: 'FILECAGE_SVG_XXE',
   FILENAME_EMPTY: 'FILECAGE_FILENAME_EMPTY',
@@ -1615,12 +1617,17 @@ function zeroByteIndex(bytes, start, end) {
   return -1;
 }
 
-function scanPngCompressedText(bytes, patterns) {
-  const hits = [];
-  if (!bytesEqualAt(bytes, 0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return hits;
+const PNG_COMPRESSED_TEXT_STREAM_CAP = 1048576;
+const PNG_COMPRESSED_TEXT_TOTAL_CAP = 4194304;
+
+function inspectPngMetadata(bytes) {
+  const metadata = { textChunks: [], binarySlices: [], limited: false };
+  if (!bytesEqualAt(bytes, 0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return metadata;
   let position = 8;
   let outputBytes = 0;
-  for (let chunks = 0; chunks < 1024 && outputBytes < 4194304; chunks += 1) {
+  let chunks = 0;
+  let sawIend = false;
+  while (chunks < 1024) {
     if (position + 12 > bytes.length) break;
     const length = u32be(bytes, position);
     const type = asciiAt(bytes, position + 4, 4);
@@ -1629,35 +1636,228 @@ function scanPngCompressedText(bytes, patterns) {
     const dataEnd = dataStart + length;
     const end = position + 12 + length;
     if (end > bytes.length) break;
+    chunks += 1;
     if (type === 'zTXt' || type === 'iTXt') {
       const keywordEnd = zeroByteIndex(bytes, dataStart, Math.min(dataEnd, dataStart + 80));
       let compressedStart = -1;
+      let uncompressedTextStart = -1;
+      let malformedTextChunk = false;
       if (keywordEnd > dataStart) {
         if (type === 'zTXt') {
-          if (bytes[keywordEnd + 1] === 0) compressedStart = keywordEnd + 2;
-        } else {
+          if (keywordEnd + 1 < dataEnd && bytes[keywordEnd + 1] === 0) {
+            compressedStart = keywordEnd + 2;
+          } else {
+            malformedTextChunk = true;
+          }
+        } else if (keywordEnd + 2 < dataEnd) {
           const compressionFlag = bytes[keywordEnd + 1];
           const compressionMethod = bytes[keywordEnd + 2];
           const languageEnd = zeroByteIndex(bytes, keywordEnd + 3, dataEnd);
           const translatedEnd = languageEnd === -1 ? -1 : zeroByteIndex(bytes, languageEnd + 1, dataEnd);
-          if (compressionFlag === 1 && compressionMethod === 0 && translatedEnd !== -1) compressedStart = translatedEnd + 1;
-        }
-      }
-      if (compressedStart !== -1 && compressedStart < dataEnd) {
-        try {
-          const inflated = inflateSync(Buffer.from(bytes.buffer, bytes.byteOffset + compressedStart, dataEnd - compressedStart), { maxOutputLength: 1048576 });
-          outputBytes += inflated.length;
-          for (const hit of scanAsciiPatterns(inflated, patterns, 0)) {
-            hits.push({ pattern: hit.pattern, position: dataStart });
+          const textStart = translatedEnd === -1 ? dataEnd : translatedEnd + 1;
+          if (compressionFlag === 1 && compressionMethod === 0 && translatedEnd !== -1) {
+            compressedStart = textStart;
+          } else if (compressionFlag === 0 && compressionMethod === 0 && translatedEnd !== -1) {
+            uncompressedTextStart = textStart;
+          } else {
+            malformedTextChunk = true;
           }
-        } catch {
+        } else {
+          malformedTextChunk = true;
         }
+      } else {
+        malformedTextChunk = true;
       }
+      if (compressedStart !== -1 && compressedStart <= dataEnd) {
+        if (outputBytes >= PNG_COMPRESSED_TEXT_TOTAL_CAP) {
+          metadata.limited = true;
+        } else {
+          const streamCap = Math.min(PNG_COMPRESSED_TEXT_STREAM_CAP, PNG_COMPRESSED_TEXT_TOTAL_CAP - outputBytes);
+          try {
+            const compressedBytes = Buffer.from(bytes.buffer, bytes.byteOffset + compressedStart, dataEnd - compressedStart);
+            const inflatedResult = inflateSync(compressedBytes, { maxOutputLength: streamCap, info: true });
+            if (inflatedResult.engine.bytesWritten === compressedBytes.length) {
+              const inflated = inflatedResult.buffer;
+              outputBytes += inflated.length;
+              metadata.textChunks.push({ data: inflated, position: dataStart });
+              metadata.binarySlices.push({ data: inflated, position: compressedStart });
+            } else {
+              outputBytes += streamCap;
+              metadata.limited = true;
+            }
+          } catch {
+            outputBytes += streamCap;
+            metadata.limited = true;
+          }
+        }
+      } else if (uncompressedTextStart !== -1) {
+        metadata.binarySlices.push({ data: bytes.subarray(uncompressedTextStart, dataEnd), position: uncompressedTextStart });
+      } else if (malformedTextChunk) {
+        metadata.limited = true;
+      }
+    } else if (type !== 'IDAT' && (type.charCodeAt(0) & 0x20) !== 0) {
+      metadata.binarySlices.push({ data: bytes.subarray(dataStart, dataEnd), position: dataStart });
+    }
+    if (type === 'IEND') {
+      sawIend = true;
+      metadata.binarySlices.push({ data: bytes.subarray(end), position: end });
+      break;
+    }
+    position = end;
+  }
+  if (!sawIend) metadata.limited = true;
+  return metadata;
+}
+
+function scanPngCompressedText(metadata, patterns) {
+  const result = { hits: [], limited: metadata.limited };
+  for (const chunk of metadata.textChunks) {
+    for (const hit of scanAsciiPatterns(chunk.data, patterns, 0)) {
+      result.hits.push({ pattern: hit.pattern, position: chunk.position });
+    }
+  }
+  return result;
+}
+
+const IMAGE_DOCUMENT_POLYGLOT_PATTERNS = Object.freeze([
+  definePattern('pdf-signature', '%PDF-'),
+  definePattern('html-doctype', '<!doctype html'),
+  definePattern('html-root', '<html'),
+  definePattern('xml-declaration', '<?xml'),
+  definePattern('svg-root', '<svg')
+]);
+
+function inflatedPngImageData(bytes) {
+  if (!bytesEqualAt(bytes, 0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return null;
+  const parts = [];
+  let totalCompressed = 0;
+  let firstDataStart = -1;
+  let position = 8;
+  for (let chunks = 0; chunks < 1024; chunks += 1) {
+    if (position + 12 > bytes.length) return null;
+    const length = u32be(bytes, position);
+    const type = asciiAt(bytes, position + 4, 4);
+    if (!Number.isSafeInteger(length) || length > 0x7fffffff) return null;
+    const dataStart = position + 8;
+    const dataEnd = dataStart + length;
+    const end = position + 12 + length;
+    if (end > bytes.length) return null;
+    if (type === 'IDAT' && length > 0) {
+      if (totalCompressed + length > 4194304) return null;
+      if (firstDataStart === -1) firstDataStart = dataStart;
+      parts.push(Buffer.from(bytes.buffer, bytes.byteOffset + dataStart, length));
+      totalCompressed += length;
     }
     if (type === 'IEND') break;
     position = end;
   }
-  return hits;
+  if (parts.length === 0) return null;
+  try {
+    return { data: inflateSync(Buffer.concat(parts, totalCompressed), { maxOutputLength: 4194304 }), position: firstDataStart };
+  } catch {
+    return null;
+  }
+}
+
+function scanPngInflatedImageData(bytes, patterns) {
+  const inflated = inflatedPngImageData(bytes);
+  if (inflated === null) return [];
+  return scanAsciiPatterns(inflated.data, patterns, 0).map((hit) => ({ pattern: hit.pattern, position: hit.position }));
+}
+
+const EMBEDDED_BINARY_SIGNATURES = Object.freeze([
+  Object.freeze({ id: 'elf-executable', values: [0x7f, 0x45, 0x4c, 0x46] }),
+  Object.freeze({ id: 'wasm-executable', values: [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00] }),
+  Object.freeze({ id: 'macho-executable', values: [0xfe, 0xed, 0xfa, 0xce] }),
+  Object.freeze({ id: 'macho-executable', values: [0xce, 0xfa, 0xed, 0xfe] }),
+  Object.freeze({ id: 'macho-executable', values: [0xfe, 0xed, 0xfa, 0xcf] }),
+  Object.freeze({ id: 'macho-executable', values: [0xcf, 0xfa, 0xed, 0xfe] }),
+  Object.freeze({ id: 'macho-executable', values: [0xca, 0xfe, 0xba, 0xbf] }),
+  Object.freeze({ id: 'macho-executable', values: [0xbf, 0xba, 0xfe, 0xca] }),
+  Object.freeze({ id: 'java-class-executable', values: [0xca, 0xfe, 0xba, 0xbe] }),
+  Object.freeze({ id: 'zstd-archive', values: [0x28, 0xb5, 0x2f, 0xfd] }),
+  Object.freeze({ id: 'ole-container', values: [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1] }),
+  Object.freeze({ id: 'sqlite-container', values: [0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00] })
+]);
+
+function scanEmbeddedBinarySignatures(bytes, start) {
+  const output = [];
+  const seen = new Set();
+  const add = (id, position) => {
+    if (!seen.has(id)) {
+      seen.add(id);
+      output.push({ id, position });
+    }
+  };
+  for (const signature of EMBEDDED_BINARY_SIGNATURES) {
+    const position = indexOfBytes(bytes, signature.values, start);
+    if (position !== -1) add(signature.id, position);
+  }
+  let search = start;
+  while (search < bytes.length) {
+    const position = indexOfBytes(bytes, [0x4d, 0x5a], search);
+    if (position === -1) break;
+    const peOffset = position + 0x40 <= bytes.length ? u32le(bytes, position + 0x3c) : -1;
+    if (peOffset >= 0 && peOffset < 4096 && bytesEqualAt(bytes, position + peOffset, [0x50, 0x45, 0x00, 0x00])) {
+      add('pe-executable', position);
+      break;
+    }
+    search = position + 1;
+  }
+  return output;
+}
+
+function addBinaryHits(output, seen, hits, basePosition) {
+  for (const hit of hits) {
+    if (!seen.has(hit.id)) {
+      seen.add(hit.id);
+      output.push({ id: hit.id, position: hit.position + basePosition });
+    }
+  }
+}
+
+function scanBinarySlice(bytes, start, end, output, seen) {
+  if (end <= start) return;
+  addBinaryHits(output, seen, scanEmbeddedBinarySignatures(bytes.subarray(start, end), 0), start);
+}
+
+function scanPngBinarySignatures(metadata) {
+  const output = [];
+  const seen = new Set();
+  for (const slice of metadata.binarySlices) {
+    if (slice.data.length === 0) continue;
+    addBinaryHits(output, seen, scanEmbeddedBinarySignatures(slice.data, 0), slice.position);
+  }
+  return output;
+}
+
+function scanImageBinarySignatures(bytes, format, pngMetadata) {
+  if (format === 'png') return scanPngBinarySignatures(pngMetadata);
+  const output = [];
+  const seen = new Set();
+  let trailingStart = -1;
+  if (format === 'jpeg') {
+    const endOfImage = indexOfBytes(bytes, [0xff, 0xd9], 2);
+    if (endOfImage !== -1) trailingStart = endOfImage + 2;
+  } else if (format === 'webp' && bytes.length >= 12 && asciiAt(bytes, 0, 4) === 'RIFF' && asciiAt(bytes, 8, 4) === 'WEBP') {
+    const declaredEnd = 8 + u32le(bytes, 4);
+    if (declaredEnd >= 12 && declaredEnd <= bytes.length) trailingStart = declaredEnd;
+  } else if (format === 'bmp' && bytes.length >= 14) {
+    const declaredEnd = u32le(bytes, 2);
+    if (declaredEnd >= 14 && declaredEnd <= bytes.length) trailingStart = declaredEnd;
+  }
+  if (trailingStart !== -1) scanBinarySlice(bytes, trailingStart, bytes.length, output, seen);
+  return output;
+}
+
+function addEmbeddedPolyglotFinding(findings, seen, id, position, source) {
+  if (seen.has(id)) return;
+  seen.add(id);
+  findings.push(finding(ERROR.POLYGLOT, 'image contains an embedded document, executable, or archive signature', {
+    position,
+    pattern: id,
+    actual: source
+  }));
 }
 
 function findZipSignature(bytes, start) {
@@ -1676,6 +1876,13 @@ function findZipSignature(bytes, start) {
 
 function scanActiveAndPolyglot(bytes, sniffed, policy) {
   const findings = [];
+  const pngMetadata = sniffed.format === 'png' && (policy.scanActiveContent || policy.scanPolyglots) ? inspectPngMetadata(bytes) : null;
+  let pngScanLimitReported = false;
+  const addPngScanLimitFinding = () => {
+    if (pngScanLimitReported) return;
+    pngScanLimitReported = true;
+    findings.push(finding(ERROR.PNG_SCAN_LIMIT, 'PNG compressed metadata scan was incomplete because a safety limit was reached or compressed metadata could not be fully decoded', { actual: 'incomplete-scan' }));
+  };
   if (policy.scanActiveContent) {
     if (sniffed.format === 'pdf' || pdfHeaderOffset(bytes) !== -1) findings.push(...scanPdfActiveContent(bytes, policy));
     if (sniffed.format === 'svg') findings.push(...scanSvgActiveContent(bytes));
@@ -1694,10 +1901,20 @@ function scanActiveAndPolyglot(bytes, sniffed, policy) {
       }));
     }
     if (sniffed.format === 'png') {
-      for (const hit of scanPngCompressedText(bytes, patterns)) {
+      const compressedActiveScan = scanPngCompressedText(pngMetadata, patterns);
+      if (compressedActiveScan.limited) addPngScanLimitFinding();
+      for (const hit of compressedActiveScan.hits) {
         if (activePatterns.has(hit.pattern.id)) continue;
         activePatterns.add(hit.pattern.id);
         findings.push(finding(ERROR.ACTIVE_CONTENT, 'compressed PNG text contains active markup or server-side code', {
+          position: hit.position,
+          pattern: hit.pattern.id
+        }));
+      }
+      for (const hit of scanPngInflatedImageData(bytes, patterns)) {
+        if (activePatterns.has(hit.pattern.id)) continue;
+        activePatterns.add(hit.pattern.id);
+        findings.push(finding(ERROR.ACTIVE_CONTENT, 'inflated PNG image data contains active markup or server-side code', {
           position: hit.position,
           pattern: hit.pattern.id
         }));
@@ -1710,7 +1927,22 @@ function scanActiveAndPolyglot(bytes, sniffed, policy) {
     if (zipAt !== -1) {
       findings.push(finding(ERROR.POLYGLOT, 'image contains an embedded ZIP or JAR signature', { position: zipAt, pattern: 'zip-signature' }));
     }
+    const embeddedSeen = new Set();
+    for (const hit of scanAsciiPatterns(bytes, IMAGE_DOCUMENT_POLYGLOT_PATTERNS, 1)) {
+      addEmbeddedPolyglotFinding(findings, embeddedSeen, hit.pattern.id, hit.position, 'file-bytes');
+    }
+    for (const hit of scanImageBinarySignatures(bytes, sniffed.format, pngMetadata)) {
+      addEmbeddedPolyglotFinding(findings, embeddedSeen, hit.id, hit.position, 'structured-image-region');
+    }
     if (sniffed.format === 'png') {
+      const compressedPolyglotScan = scanPngCompressedText(pngMetadata, IMAGE_DOCUMENT_POLYGLOT_PATTERNS);
+      if (compressedPolyglotScan.limited) addPngScanLimitFinding();
+      for (const hit of compressedPolyglotScan.hits) {
+        addEmbeddedPolyglotFinding(findings, embeddedSeen, hit.pattern.id, hit.position, 'png-text');
+      }
+      for (const hit of scanPngInflatedImageData(bytes, IMAGE_DOCUMENT_POLYGLOT_PATTERNS)) {
+        addEmbeddedPolyglotFinding(findings, embeddedSeen, hit.pattern.id, hit.position, 'png-image-data');
+      }
       const logicalEnd = pngLogicalEnd(bytes);
       if (logicalEnd !== -1 && logicalEnd < bytes.length) {
         findings.push(finding(ERROR.TRAILING_DATA, 'PNG contains data after the IEND chunk', {
@@ -1941,11 +2173,69 @@ function pathFailure(filePath, policy, findings, sizeBytes = null) {
   }, policy);
 }
 
+function ancestorDirectories(filePath) {
+  const directories = [];
+  let current = dirname(filePath);
+  while (current && current !== '.') {
+    directories.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return directories.reverse();
+}
+
+function isDarwinCompatibilityAlias(directory, stat) {
+  if (process.platform !== 'darwin' || !stat.isSymbolicLink() || stat.uid !== 0) return false;
+  const expected = directory === '/tmp' ? 'private/tmp' : directory === '/var' ? 'private/var' : null;
+  if (expected === null) return false;
+  try {
+    return readlinkSync(directory) === expected;
+  } catch {
+    return false;
+  }
+}
+
+function directoryForInspection(directory) {
+  const root = parsePath(directory).root;
+  let end = directory.length;
+  while (end > root.length) {
+    const last = directory[end - 1];
+    const separator = last === '/' || (process.platform === 'win32' && last === '\\');
+    if (!separator) break;
+    end -= 1;
+  }
+  const trimmed = directory.slice(0, end);
+  return trimmed.length === 0 ? root : trimmed;
+}
+
+function intermediatePathSymlinkState(filePath) {
+  for (const directory of ancestorDirectories(filePath)) {
+    const inspectionPath = directoryForInspection(directory);
+    let stat;
+    try {
+      stat = lstatSync(inspectionPath);
+    } catch {
+      return 'io';
+    }
+    if (stat.isSymbolicLink() && !isDarwinCompatibilityAlias(inspectionPath, stat)) return 'symlink';
+  }
+  return null;
+}
+
 export function validateFilePath(filePath, policyInput) {
   const policy = normalizePolicy(policyInput);
   if (typeof filePath !== 'string' || filePath.length === 0) invalidInput('filePath must be a non-empty string', 'filePath');
   if (filePath.includes('\0')) {
     return pathFailure(filePath, policy, [finding(ERROR.PATH_UNSAFE, 'file path contains a NUL byte')]);
+  }
+
+  const intermediateState = intermediatePathSymlinkState(filePath);
+  if (intermediateState === 'symlink') {
+    return pathFailure(filePath, policy, [finding(ERROR.PATH_SYMLINK, 'symbolic links are rejected', { actual: 'intermediate-symlink' })]);
+  }
+  if (intermediateState === 'io') {
+    return pathFailure(filePath, policy, [finding(ERROR.PATH_IO_ERROR, 'file path components could not be inspected')]);
   }
 
   let initialStat;
@@ -1997,6 +2287,10 @@ export function validateFilePath(filePath, policyInput) {
       || finalMeta.dev !== beforeMeta.dev;
     if (offset !== size || finalStat.size !== size || metadataChanged) {
       return pathFailure(filePath, policy, [finding(ERROR.PATH_IO_ERROR, 'file changed or truncated while it was being read', { actual: 'unstable-read' })], size);
+    }
+    const postReadState = intermediatePathSymlinkState(filePath);
+    if (postReadState !== null) {
+      return pathFailure(filePath, policy, [finding(ERROR.PATH_IO_ERROR, 'file path components changed while it was being read', { actual: 'identity-change' })], size);
     }
     const executableMode = process.platform !== 'win32' && (stat.mode & 0o111) !== 0;
     return validateUploadInternal({ bytes: buffer, filename: pathBasename(filePath), contentType: undefined }, policy, { executableMode });
